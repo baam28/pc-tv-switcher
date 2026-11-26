@@ -2,6 +2,8 @@
 
 Switch your laptop between two display profiles with one hotkey.
 
+Download `TVMode.exe` from [GitHub Releases](https://github.com/baam28/tv-mode/releases/latest).
+
 - **PC profile**: for example, laptop screen + monitor, with sound on your speakers
 - **TV profile**: for example, TV only, with sound on the TV, and Steam Big Picture opened
 
@@ -27,7 +29,9 @@ Each profile has its own **screens to turn on**, an optional **saved layout**, a
      - Store apps and web links open fine but can't be closed automatically.
    - **Steam Big Picture:** TV mode opens Big Picture on the TV, starting Steam if needed. With its close switch on, going back to PC mode leaves Big Picture.
      If Steam wasn't running before TV mode, Steam is shut down too. If it was already running, Steam keeps running.
-   - The pencil button opens **Start options** for a desktop app, for example to add `--fullscreen`. The trash button removes an app from the list.
+   - Use the pencil button to open **Start options** for any app. Desktop apps can also take command-line arguments such as `--fullscreen`.
+   - An app can wait for a TV profile screen to become the main display, for the selected TV sound output to become the Windows default, or for both. If a selected condition is still pending after 12 seconds, TV Mode skips that app and reports why. Selecting **Don't change** for TV sound leaves the audio check inactive.
+   - The trash button removes an app from the list.
    - Upgrading from the single-app setting carries over the selected app, its start options, and its close switch.
 
 ## Settings (gear icon, top right)
@@ -50,6 +54,8 @@ Settings are saved in `%APPDATA%\TVMode\settings.ini`. A screen that's unplugged
   TVMode.exe list
   ```
   The command-line switches use the same TV app list and close switches. `list` shows the configured apps and their close settings.
+
+Choose **TV mode without apps** from the tray menu to apply the TV display and sound profile without launching apps. This is a one-time action. Apps already running stay open, and the normal PC mode close settings still apply when you switch back.
 
 After each switch, a large message appears for about two seconds in the middle of the new main screen, for example "TV MODE" with "Sound: LG TV" below it. It never takes focus from a game or video, and clicks go straight through it. If a switch fails, the message shows why, in red.
 

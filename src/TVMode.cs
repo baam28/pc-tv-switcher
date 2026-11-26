@@ -681,6 +681,26 @@ namespace TVMode
             return BuildTargets(paths);
         }
 
+        public static bool IsPrimaryInProfile(HashSet<string> keys)
+        {
+            Native.DISPLAYCONFIG_PATH_INFO[] paths;
+            Native.DISPLAYCONFIG_MODE_INFO[] modes;
+            Query(Native.QDC_ONLY_ACTIVE_PATHS, out paths, out modes);
+            var primaryKeys = new HashSet<string>(paths.Where(p =>
+            {
+                uint index = p.sourceInfo.modeInfoIdx;
+                return index < modes.Length && IsPrimarySource(modes[index]);
+            }).Select(TargetKey));
+            return BuildTargets(paths).Any(t => primaryKeys.Contains(t.HwKey) && keys.Contains(t.Key));
+        }
+
+        static bool IsPrimarySource(Native.DISPLAYCONFIG_MODE_INFO mode)
+        {
+            // The desktop origin is stored in the source mode's position fields.
+            return mode.infoType == Native.DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE
+                && (uint)(mode.u1 >> 32) == 0 && (uint)mode.u2 == 0;
+        }
+
         /// <summary>Turns on exactly the connected displays matching <paramref name="wanted"/> (extended desktop) and turns off the rest.</summary>
         public static void Apply(Func<DisplayTarget, bool> wanted)
         {
@@ -840,8 +860,7 @@ namespace TVMode
                 var m = modes[si];
                 // source mode: width, height | pixelFormat, position.x | position.y
                 res = " " + (uint)(m.u0 & 0xFFFFFFFF) + "x" + (uint)(m.u0 >> 32);
-                int x = (int)(m.u1 >> 32), y = (int)(uint)(m.u2 & 0xFFFFFFFF);
-                if (x == 0 && y == 0) main = " (main)";
+                if (IsPrimarySource(m)) main = " (main)";
             }
             if (ti < modes.Length && modes[ti].infoType == Native.DISPLAYCONFIG_MODE_INFO_TYPE_TARGET)
             {
@@ -1036,7 +1055,9 @@ namespace TVMode
                                         TvApps.Add(new TvApp
                                         {
                                             Name = p[0].Trim(), Path = p[1].Trim(), Args = p.Length > 2 ? p[2].Trim() : "",
-                                            CloseOnPc = p.Length <= 3 || p[3].Trim() != "0"
+                                            CloseOnPc = p.Length <= 3 || p[3].Trim() != "0",
+                                            WaitForPrimary = p.Length > 4 && p[4].Trim() == "1",
+                                            WaitForAudio = p.Length > 5 && p[5].Trim() == "1"
                                         });
                                     hasAppList = true;
                                     break;
@@ -1086,7 +1107,8 @@ namespace TVMode
             lines.Add("LastMode=" + (LastMode == Mode.TV ? "TV" : LastMode == Mode.PC ? "PC" : ""));
             lines.Add("TvApps=1"); // marks the list format, so an empty list stays empty
             foreach (var a in TvApps)
-                lines.Add("TvApp=" + Clean(a.Name) + "\t" + Clean(a.Path) + "\t" + Clean(a.Args) + "\t" + (a.CloseOnPc ? "1" : "0"));
+                lines.Add("TvApp=" + Clean(a.Name) + "\t" + Clean(a.Path) + "\t" + Clean(a.Args) + "\t" + (a.CloseOnPc ? "1" : "0")
+                    + "\t" + (a.WaitForPrimary ? "1" : "0") + "\t" + (a.WaitForAudio ? "1" : "0"));
             WriteLayout(lines, "Pc", Pc);
             WriteLayout(lines, "Tv", Tv);
             File.WriteAllLines(FilePath, lines);
@@ -1209,6 +1231,8 @@ namespace TVMode
         public string Path = "";       // .exe, shortcut, steam:// link or shell:AppsFolder\... Store app
         public string Args = "";
         public bool CloseOnPc = true;  // close it again when going back to PC mode
+        public bool WaitForPrimary;
+        public bool WaitForAudio;
 
         /// <summary>Identifies the app in the launch-state file.</summary>
         public string Key { get { return (Path ?? "").Trim().ToLowerInvariant(); } }
@@ -1532,18 +1556,20 @@ namespace TVMode
         /// Opens (TV) or closes (PC, only apps with CloseOnPc) every TV app, all at the same time - each one may wait a
         /// few seconds. <paramref name="report"/> is called (from a worker thread) as each app finishes.
         /// </summary>
-        public static void RunAll(bool open, IEnumerable<TvApp> apps, Action<Result> report)
+        public static void RunAll(bool open, IEnumerable<TvApp> apps, HashSet<string> tvKeys, string audioId,
+            Action<Result> report, Func<bool> cancelled = null)
         {
             using (var mutex = new Mutex(false, "TVMode_AppBatch_7b3f"))
             {
                 try { mutex.WaitOne(); }
                 catch (AbandonedMutexException) { }
-                try { RunBatch(open, apps, report); }
+                try { RunBatch(open, apps, report, tvKeys, audioId, cancelled ?? (() => false)); }
                 finally { mutex.ReleaseMutex(); }
             }
         }
 
-        static void RunBatch(bool open, IEnumerable<TvApp> apps, Action<Result> report)
+        static void RunBatch(bool open, IEnumerable<TvApp> apps, Action<Result> report, HashSet<string> tvKeys,
+            string audioId, Func<bool> cancelled)
         {
             var groups = apps.Where(a => !string.IsNullOrEmpty(a.Path) && (open || a.CloseOnPc))
                 .GroupBy(a => ProcessNameFor(a.Path) ?? a.Key, StringComparer.OrdinalIgnoreCase);
@@ -1556,7 +1582,16 @@ namespace TVMode
                     foreach (var app in batch)
                     {
                         var r = new Result { App = app };
-                        try { r.Message = open ? Launch(app, out r.Error) : Close(app, out r.Error); }
+                        try
+                        {
+                            if (open)
+                            {
+                                r.Message = WaitForLaunch(app, tvKeys, audioId, cancelled);
+                                if (cancelled()) return;
+                            }
+                            r.Error = r.Message != null;
+                            if (!r.Error) r.Message = open ? Launch(app, out r.Error) : Close(app, out r.Error);
+                        }
                         catch (Exception ex) { r.Message = NameOf(app) + ": " + ex.Message; r.Error = true; }
                         if (r.Message != null && report != null) report(r);
                     }
@@ -1567,6 +1602,27 @@ namespace TVMode
                 threads.Add(t);
             }
             foreach (var t in threads) t.Join();
+        }
+
+        static string WaitForLaunch(TvApp app, HashSet<string> tvKeys, string audioId, Func<bool> cancelled)
+        {
+            bool checkAudio = app.WaitForAudio && !string.IsNullOrEmpty(audioId);
+            var timer = System.Diagnostics.Stopwatch.StartNew();
+            while (!cancelled())
+            {
+                bool primaryReady = !app.WaitForPrimary || DisplayManager.IsPrimaryInProfile(tvKeys);
+                bool audioReady = !checkAudio || string.Equals(AudioManager.GetDefaultId(), audioId, StringComparison.OrdinalIgnoreCase);
+                if (primaryReady && audioReady) return null;
+                if (timer.ElapsedMilliseconds >= 12000)
+                {
+                    string reason = !primaryReady && !audioReady ? "the TV display and sound weren't ready"
+                        : !primaryReady ? "no TV profile screen became the main display"
+                        : "the TV sound output didn't become the Windows default";
+                    return "Skipped " + NameOf(app) + " because " + reason;
+                }
+                Thread.Sleep(250);
+            }
+            return null;
         }
     }
 
@@ -1616,22 +1672,27 @@ namespace TVMode
                     Modes.Switch(mode, out refreshNote);
                     Console.WriteLine("Switched to " + Modes.Name(mode) + " mode.");
                     if (refreshNote != null) Console.WriteLine(refreshNote);
+                    var prof = Settings.For(mode);
+                    System.Threading.Tasks.Task sound = null;
+                    if (!string.IsNullOrEmpty(prof.AudioId))
+                    {
+                        sound = System.Threading.Tasks.Task.Factory.StartNew(delegate
+                        {
+                            string err;
+                            if (AudioManager.SetDefault(prof.AudioId, 10000, out err))
+                                Console.WriteLine("Sound: " + prof.AudioName);
+                            else
+                                Console.Error.WriteLine("Sound: " + err);
+                        });
+                    }
                     if (Settings.TvApps.Count > 0)
                     {
                         if (mode == Mode.TV) Thread.Sleep(1200); // let the TV finish switching so the apps open there
                         var printLock = new object();
-                        AppLauncher.RunAll(mode == Mode.TV, Settings.TvApps,
+                        AppLauncher.RunAll(mode == Mode.TV, Settings.TvApps, prof.Keys, prof.AudioId,
                             r => { lock (printLock) (r.Error ? Console.Error : Console.Out).WriteLine(r.Message); });
                     }
-                    var prof = Settings.For(mode);
-                    if (!string.IsNullOrEmpty(prof.AudioId))
-                    {
-                        string err;
-                        if (AudioManager.SetDefault(prof.AudioId, 10000, out err))
-                            Console.WriteLine("Sound: " + prof.AudioName);
-                        else
-                            Console.Error.WriteLine("Sound: " + err);
-                    }
+                    if (sound != null) sound.GetAwaiter().GetResult();
                     return 0;
                 }
                 catch (Exception ex)

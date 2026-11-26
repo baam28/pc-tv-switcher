@@ -33,7 +33,7 @@ namespace TVMode
         System.Windows.Forms.Timer refreshTimer, displayChangeTimer, statusTimer;
         SettingsDialog settingsDialog;
         Thread appWorker;
-        int switchVersion;
+        volatile int switchVersion;
 
         class ProfileUi
         {
@@ -221,7 +221,6 @@ namespace TVMode
             row.Disposed += delegate { if (icon != null) icon.Dispose(); };
 
             bool canClose = AppLauncher.CanClose(app.Path);
-            bool hasOptions = canClose && !AppLauncher.IsSteam(app.Path);
             const float toggleW = 164, btnW = 30;
             float buttonsW = btnW * 2 + 4;
             float textW = rw - 48 - toggleW - buttonsW - 24;
@@ -254,7 +253,6 @@ namespace TVMode
 
             var options = Place(row, new FlatButton { Style = FlatButton.Kind.Icon, Glyph = "", GlyphFont = Sc.Icons(13), Text = "Start options" },
                 rw - 12 - btnW * 2 - 4, 5, btnW, 30);
-            options.Visible = hasOptions;
             options.Click += delegate { EditAppOptions(app); };
             new ToolTip().SetToolTip(options, "Start options");
 
@@ -324,11 +322,8 @@ namespace TVMode
 
         void EditAppOptions(TvApp app)
         {
-            string args = TextPrompt.Ask(this, UiNative.DpiOf(Handle), "Start options",
-                "Extra start options for " + AppLauncher.NameOf(app) + ". Most apps don't need any.",
-                app.Args, "for example  --fullscreen");
-            if (args == null) return;
-            app.Args = args;
+            using (var dialog = new AppStartOptions(UiNative.DpiOf(Handle), app))
+                if (dialog.ShowDialog(this) != DialogResult.OK) return;
             SaveQuietly();
             BuildUi();
         }
@@ -353,6 +348,7 @@ namespace TVMode
             trayTv = new ToolStripMenuItem("TV mode", null, delegate { DoSwitch(Mode.TV); });
             trayMenu.Items.Add(trayPc);
             trayMenu.Items.Add(trayTv);
+            trayMenu.Items.Add("TV mode without apps", null, delegate { DoSwitch(Mode.TV, false); });
             trayMenu.Items.Add(new ToolStripSeparator());
             trayMenu.Items.Add("Open TV Mode", null, delegate { ShowWindow(); });
             trayMenu.Items.Add("Settings...", null, delegate { ShowWindow(); OpenSettings(); });
@@ -488,7 +484,7 @@ namespace TVMode
 
         // ---------------- switching
 
-        void DoSwitch(Mode mode)
+        void DoSwitch(Mode mode, bool launchApps = true)
         {
             string title = Modes.Name(mode) + " MODE";
             try
@@ -504,11 +500,12 @@ namespace TVMode
 
                 var p = Settings.For(mode);
                 bool audio = !string.IsNullOrEmpty(p.AudioId);
-                bool openApps = mode == Mode.TV && Settings.TvApps.Count > 0;
+                bool openApps = mode == Mode.TV && launchApps && Settings.TvApps.Count > 0;
                 bool closeApps = mode == Mode.PC && Settings.TvApps.Any(a => a.CloseOnPc);
 
                 // Screens go blank for a moment during the switch; show the message once they're back.
                 ShowOsdSoon(mode, title, usedLayout ? "Saved layout restored" : "");
+                if (!launchApps) SetOsdLine(1, "App launches skipped", false);
                 if (audio)
                 {
                     SetOsdLine(0, "Sound: " + p.AudioName + "...", false);
@@ -611,15 +608,19 @@ namespace TVMode
             int version = switchVersion;
             var apps = Settings.TvApps.Select(a => new TvApp
             {
-                Name = a.Name, Path = a.Path, Args = a.Args, CloseOnPc = a.CloseOnPc
+                Name = a.Name, Path = a.Path, Args = a.Args, CloseOnPc = a.CloseOnPc,
+                WaitForPrimary = a.WaitForPrimary, WaitForAudio = a.WaitForAudio
             }).ToList();
+            var tvKeys = Settings.Tv.Keys;
+            string audioId = Settings.Tv.AudioId;
             var previous = appWorker;
             var results = new List<AppLauncher.Result>();
             appWorker = new Thread(delegate ()
             {
                 if (previous != null) previous.Join();
+                if (open && version != switchVersion) return;
                 if (open) Thread.Sleep(1200); // let the TV finish switching so the apps open there
-                AppLauncher.RunAll(open, apps, r =>
+                AppLauncher.RunAll(open, apps, tvKeys, audioId, r =>
                 {
                     try
                     {
@@ -629,7 +630,7 @@ namespace TVMode
                         });
                     }
                     catch { } // window closed meanwhile
-                });
+                }, () => open && version != switchVersion);
             });
             appWorker.IsBackground = true;
             appWorker.Start();
@@ -1152,26 +1153,24 @@ namespace TVMode
         }
     }
 
-    // ------------------------------------------------------------------ Text prompt
-    /// <summary>Tiny one-line text prompt in the app's style.</summary>
-    class TextPrompt : ThemedForm
+    // ------------------------------------------------------------------ App start options
+    class AppStartOptions : ThemedForm
     {
         TextBox box;
-        readonly string label, placeholder;
+        Toggle primary, audio;
+        readonly TvApp app;
+        readonly bool hasArguments;
         string value;
+        bool waitForPrimary, waitForAudio;
 
-        public static string Ask(IWin32Window owner, int dpi, string title, string label, string value, string placeholder)
+        public AppStartOptions(int dpi, TvApp app) : base(dpi)
         {
-            using (var f = new TextPrompt(dpi, title, label, value, placeholder))
-                return f.ShowDialog(owner) == DialogResult.OK ? f.box.Text.Trim() : null;
-        }
-
-        TextPrompt(int dpi, string title, string label, string value, string placeholder) : base(dpi)
-        {
-            this.label = label;
-            this.value = value;
-            this.placeholder = placeholder;
-            Text = title;
+            this.app = app;
+            hasArguments = AppLauncher.CanClose(app.Path) && !AppLauncher.IsSteam(app.Path);
+            value = app.Args;
+            waitForPrimary = app.WaitForPrimary;
+            waitForAudio = app.WaitForAudio;
+            Text = "Start options for " + AppLauncher.NameOf(app);
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = MinimizeBox = false;
             ShowInTaskbar = false;
@@ -1183,30 +1182,56 @@ namespace TVMode
         protected override void BuildUi()
         {
             if (box != null) value = box.Text;
+            if (primary != null) waitForPrimary = primary.Checked;
+            if (audio != null) waitForAudio = audio.Checked;
             ClearUi();
-            const float w = 440;
-            ClientSize = new Size(Sc.S(w), Sc.S(150));
-            AddLabel(this, label, 20, 18, w - 40, 20, Sc.Font(12.5f), Theme.Muted);
-            var frame = Place(this, new Card { Fill = Theme.Inset, Radius = 8 * Sc.F }, 20, 44, w - 40, 36);
-            box = new TextBox
+            const float w = 470;
+            float y = 20;
+            if (hasArguments)
             {
-                BorderStyle = BorderStyle.None, BackColor = Theme.Inset, ForeColor = Theme.Fg, Font = Sc.Font(13.5f), Text = value ?? "",
-                Left = Sc.S(10), Width = Sc.S(w - 40 - 20)
-            };
-            box.Top = (frame.Height - box.PreferredHeight) / 2;
-            frame.Controls.Add(box);
-            Native.SetPlaceholder(box, placeholder);
+                AddLabel(this, "Command-line arguments", 20, y, w - 40, 20, Sc.Font(12.5f), Theme.Muted);
+                var frame = Place(this, new Card { Fill = Theme.Inset, Radius = 8 * Sc.F }, 20, y + 26, w - 40, 36);
+                box = new TextBox
+                {
+                    BorderStyle = BorderStyle.None, BackColor = Theme.Inset, ForeColor = Theme.Fg, Font = Sc.Font(13.5f),
+                    Text = value ?? "", Left = Sc.S(10), Width = Sc.S(w - 60)
+                };
+                box.Top = (frame.Height - box.PreferredHeight) / 2;
+                frame.Controls.Add(box);
+                Native.SetPlaceholder(box, "For example, --fullscreen");
+                y += 76;
+            }
 
-            var ok = Place(this, new FlatButton { Style = FlatButton.Kind.Primary, Text = "Save", Font = Sc.Font(13, true) }, w - 20 - 90 - 10 - 90, 98, 90, 34);
-            ok.Click += delegate { DialogResult = DialogResult.OK; };
-            var cancel = Place(this, new FlatButton { Text = "Cancel", Font = Sc.Font(13) }, w - 20 - 90, 98, 90, 34);
+            primary = Place(this, new Toggle { Text = "Wait for a TV profile screen to become the main display",
+                Font = Sc.Font(12.5f), ForeColor = Theme.Fg, Surface = BackColor }, 20, y, w - 40, 27);
+            primary.SetQuietly(waitForPrimary);
+            audio = Place(this, new Toggle { Text = "Wait for the TV sound output to become the default",
+                Font = Sc.Font(12.5f), ForeColor = Theme.Fg, Surface = BackColor }, 20, y + 32, w - 40, 27);
+            audio.SetQuietly(waitForAudio);
+            AddLabel(this, "Apps are skipped after 12 seconds if a selected check is still pending.",
+                20, y + 64, w - 40, 22, Sc.Font(12), Theme.Muted);
+            AddLabel(this, "The sound check needs an output selected in the TV profile.",
+                20, y + 86, w - 40, 22, Sc.Font(12), Theme.Muted);
+            y += 120;
+            ClientSize = new Size(Sc.S(w), Sc.S(y + 52));
+            var ok = Place(this, new FlatButton { Style = FlatButton.Kind.Primary, Text = "Save", Font = Sc.Font(13, true) }, w - 210, y, 90, 34);
+            ok.Click += delegate { SaveOptions(); };
+            var cancel = Place(this, new FlatButton { Text = "Cancel", Font = Sc.Font(13) }, w - 110, y, 90, 34);
             cancel.Click += delegate { DialogResult = DialogResult.Cancel; };
-            ActiveControl = box;
+            ActiveControl = (Control)box ?? primary;
+        }
+
+        void SaveOptions()
+        {
+            if (box != null) app.Args = box.Text.Trim();
+            app.WaitForPrimary = primary.Checked;
+            app.WaitForAudio = audio.Checked;
+            DialogResult = DialogResult.OK;
         }
 
         protected override void OnKeyDown(KeyEventArgs e)
         {
-            if (e.KeyCode == Keys.Enter) { DialogResult = DialogResult.OK; e.Handled = e.SuppressKeyPress = true; }
+            if (e.KeyCode == Keys.Enter) { SaveOptions(); e.Handled = e.SuppressKeyPress = true; }
             if (e.KeyCode == Keys.Escape) { DialogResult = DialogResult.Cancel; e.Handled = true; }
             base.OnKeyDown(e);
         }
