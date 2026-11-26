@@ -48,7 +48,7 @@ namespace TVMode
         public MainForm(bool startHidden) : base(Native.PrimaryDpi())
         {
             allowShow = !startHidden;
-            Text = "TV Mode";
+            Text = Program.AppName;
             FormBorderStyle = FormBorderStyle.FixedSingle;
             MaximizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
@@ -96,8 +96,8 @@ namespace TVMode
             ClientSize = new Size(Sc.S(W), Sc.S(H));
 
             // Header
-            AddLabel(this, "TV Mode", 20, 16, 120, 32, Sc.Font(21, true), Theme.Fg, ContentAlignment.MiddleLeft);
-            pill = Place(this, new Pill { Font = Sc.Font(12, true) }, 132, 22, 100, 22);
+            AddLabel(this, Program.AppName, 20, 16, 184, 32, Sc.Font(21, true), Theme.Fg, ContentAlignment.MiddleLeft);
+            pill = Place(this, new Pill { Font = Sc.Font(12, true) }, 210, 22, 100, 22);
             var btnSettings = IconButton(Theme.GlyphSettings, "Settings", W - 20 - 36);
             btnSettings.Click += delegate { OpenSettings(); };
             var btnRefresh = IconButton(Theme.GlyphRefresh, "Refresh", W - 20 - 36 - 42);
@@ -350,7 +350,7 @@ namespace TVMode
             trayMenu.Items.Add(trayTv);
             trayMenu.Items.Add("TV mode without apps", null, delegate { DoSwitch(Mode.TV, false); });
             trayMenu.Items.Add(new ToolStripSeparator());
-            trayMenu.Items.Add("Open TV Mode", null, delegate { ShowWindow(); });
+            trayMenu.Items.Add("Open " + Program.AppName, null, delegate { ShowWindow(); });
             trayMenu.Items.Add("Settings...", null, delegate { ShowWindow(); OpenSettings(); });
             trayMenu.Items.Add(new ToolStripSeparator());
             trayMenu.Items.Add("Exit", null, delegate { exiting = true; Close(); });
@@ -361,7 +361,7 @@ namespace TVMode
                 trayTv.Checked = currentMode == Mode.TV;
             };
 
-            tray = new NotifyIcon { Icon = trayIcon, Text = "TV Mode", Visible = true, ContextMenuStrip = trayMenu };
+            tray = new NotifyIcon { Icon = trayIcon, Text = Program.AppName, Visible = true, ContextMenuStrip = trayMenu };
             tray.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) ShowWindow(); };
         }
 
@@ -416,7 +416,7 @@ namespace TVMode
                 if (!trayHintShown)
                 {
                     trayHintShown = true;
-                    tray.ShowBalloonTip(3000, "TV Mode is still running",
+                    tray.ShowBalloonTip(3000, Program.AppName + " is still running",
                         "Press " + Settings.HotkeyText + " any time to switch between PC and TV mode.", ToolTipIcon.Info);
                 }
                 return;
@@ -861,8 +861,8 @@ namespace TVMode
             pill.Invalidate();
 
             string mode = currentMode == Mode.TV ? "TV mode" : currentMode == Mode.PC ? "PC mode" : "ready";
-            tray.Text = "TV Mode - " + mode + " (" + hk + ")";
-            if (tray.Text.Length > 63) tray.Text = "TV Mode - " + mode;
+            string trayText = Program.AppName + " - " + mode + " (" + hk + ")";
+            tray.Text = trayText.Length <= 63 ? trayText : Program.AppName + " - " + mode;
         }
     }
 

@@ -1,4 +1,4 @@
-// TV Mode - switch between two display profiles ("PC" and "TV"). Each profile says which
+// PC–TV Switcher - switch between two display profiles ("PC" and "TV"). Each profile says which
 // screens are on and, optionally, which sound output to use.
 // Uses the Windows CCD API (QueryDisplayConfig / SetDisplayConfig) and Core Audio.
 // Written for the C# 5 compiler that ships with Windows (.NET Framework 4.x csc.exe).
@@ -9,10 +9,15 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
+
+[assembly: AssemblyTitle(TVMode.Program.AppName)]
+[assembly: AssemblyProduct(TVMode.Program.AppName)]
+[assembly: AssemblyDescription("Switch Windows displays and sound between PC and TV profiles.")]
 
 namespace TVMode
 {
@@ -1629,6 +1634,8 @@ namespace TVMode
     // ------------------------------------------------------------------ Entry point
     static class Program
     {
+        public const string AppName = "PC–TV Switcher";
+
         /// <summary>Sent by a second launch so the running copy brings its window to the front.</summary>
         public static readonly int ShowWindowMessage = Native.RegisterWindowMessage("TVMode_ShowWindow_7b3f");
 

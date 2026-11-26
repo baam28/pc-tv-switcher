@@ -1,8 +1,8 @@
-# TV Mode
+# PC–TV Switcher
 
-Switch your laptop between two display profiles with one hotkey.
+Switch your Windows displays and sound between your desk and your TV with one hotkey. You can also launch apps such as Steam Big Picture when you switch to the TV.
 
-Download `TVMode.exe` from [GitHub Releases](https://github.com/baam28/tv-mode/releases/latest).
+Download `TVMode.exe` from [GitHub Releases](https://github.com/baam28/pc-tv-switcher/releases/latest).
 
 - **PC profile**: for example, laptop screen + monitor, with sound on your speakers
 - **TV profile**: for example, TV only, with sound on the TV, and Steam Big Picture opened
@@ -23,14 +23,14 @@ Each profile has its own **screens to turn on**, an optional **saved layout**, a
    - **Add app** offers TV-friendly apps found on this PC, such as Steam Big Picture, Kodi, VLC (full screen), Plex HTPC, Jellyfin Media Player, Playnite (full screen) and Moonlight.
    - **Choose another app...** opens a searchable list of everything in your Start menu, including Store apps like Netflix or Disney+.
      If an app isn't listed, use **Browse for a file...** at the bottom.
-   - Set **Close in PC mode** separately on each row. Turn it off to keep that app open. With it on, TV Mode asks the app to close when you switch back, as if you'd clicked its X.
-     - Only copies TV Mode opened itself are closed. If the app was already running, it is left alone.
+   - Set **Close in PC mode** separately on each row. Turn it off to keep that app open. With it on, PC–TV Switcher asks the app to close when you switch back, as if you'd clicked its X.
+     - If the app was already running before you switched to TV mode, it stays open.
      - Apps aren't force-closed, in case they're asking you to save something. If an app doesn't close, the on-screen message tells you.
      - Store apps and web links open fine but can't be closed automatically.
    - **Steam Big Picture:** TV mode opens Big Picture on the TV, starting Steam if needed. With its close switch on, going back to PC mode leaves Big Picture.
      If Steam wasn't running before TV mode, Steam is shut down too. If it was already running, Steam keeps running.
    - Use the pencil button to open **Start options** for any app. Desktop apps can also take command-line arguments such as `--fullscreen`.
-   - An app can wait for a TV profile screen to become the main display, for the selected TV sound output to become the Windows default, or for both. If a selected condition is still pending after 12 seconds, TV Mode skips that app and reports why. Selecting **Don't change** for TV sound leaves the audio check inactive.
+   - An app can wait for a TV profile screen to become the main display, for the selected TV sound output to become the Windows default, or for both. If a selected condition is still pending after 12 seconds, PC–TV Switcher skips that app and reports why. Selecting **Don't change** for TV sound leaves the audio check inactive.
    - The trash button removes an app from the list.
    - Upgrading from the single-app setting carries over the selected app, its start options, and its close switch.
 
