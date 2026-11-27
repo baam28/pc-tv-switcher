@@ -176,11 +176,22 @@ namespace TVMode
         const int MaxVisibleApps = 3;
         const float AppRowH = 48;
 
-        /// <summary>"Apps to open in TV mode": one row per app with its own close switch. Returns the card height.</summary>
+        // Two switch columns on every app row, under headings at the top of the list.
+        const float SwitchColW = 116, RowButtonW = 30;
+
+        /// <summary>X (in row coordinates) where a switch column starts: 0 = "Open in TV mode", 1 = "Close in PC mode".</summary>
+        static float SwitchColX(float rowWidth, int column)
+        {
+            float buttons = RowButtonW * 2 + 4;
+            return rowWidth - 12 - buttons - 8 - SwitchColW * (2 - column);
+        }
+
+        /// <summary>"Apps for TV mode": one row per app with two labeled switches. Returns the card height.</summary>
         float BuildAppCard(float x, float y, float w)
         {
             var apps = Settings.TvApps;
-            const float headH = 48, footH = 34;
+            float headH = apps.Count > 0 ? 70 : 48;
+            const float footH = 34;
             var workArea = (IsHandleCreated ? Screen.FromHandle(Handle) : Screen.PrimaryScreen).WorkingArea;
             float room = (workArea.Height - (Height - ClientSize.Height)) / Sc.F - y - headH - footH - 46;
             int visible = Math.Max(1, Math.Min(Math.Min(apps.Count, MaxVisibleApps), (int)(room / AppRowH)));
@@ -188,7 +199,7 @@ namespace TVMode
             var card = Place(this, new Card { Radius = 12 * Sc.F }, x, y, w, cardH);
             float iw = w - 32;
 
-            AddLabel(card, "Apps to open in TV mode", 16, 16, iw - 140, 24, Sc.Font(15, true), Theme.Fg);
+            AddLabel(card, "Apps for TV mode", 16, 16, iw - 140, 24, Sc.Font(15, true), Theme.Fg);
             var add = Place(card, new FlatButton { Text = "Add app", Glyph = "", GlyphFont = Sc.Icons(12), Font = Sc.Font(12.5f, true) },
                 w - 16 - 116, 12, 116, 32);
             add.Click += delegate { ShowAddMenu(add); };
@@ -206,7 +217,17 @@ namespace TVMode
             float rowW = w - 16 - (scroll ? SystemInformation.VerticalScrollBarWidth / Sc.F : 0);
             for (int i = 0; i < apps.Count; i++) BuildAppRow(rows, apps[i], i * AppRowH, rowW);
 
-            AddLabel(card, "Apps open a moment after switching to TV mode. Only copies TV mode opened are ever closed.",
+            if (apps.Count > 0)
+            {
+                // Column headings, lined up over the switches (rows sit 8 + 8 px in from the card edge).
+                float rw = rowW - 16, offset = 16;
+                var headFont = Sc.Font(10.5f, true);
+                AddLabel(card, "APP", offset + 12, 50, 120, 16, headFont, Theme.Muted);
+                AddLabel(card, "OPEN IN TV MODE", offset + SwitchColX(rw, 0), 50, SwitchColW, 16, headFont, Theme.Muted, ContentAlignment.TopCenter);
+                AddLabel(card, "CLOSE IN PC MODE", offset + SwitchColX(rw, 1), 50, SwitchColW, 16, headFont, Theme.Muted, ContentAlignment.TopCenter);
+            }
+
+            AddLabel(card, "Apps open a moment after switching to TV mode. TV mode only ever closes copies it opened itself.",
                 16, headH + visible * AppRowH + 8, iw, 20, Sc.Font(12), Theme.Muted);
             return cardH;
         }
@@ -217,70 +238,67 @@ namespace TVMode
             float rw = w - 16;
             var row = Place(rows, new Card { Fill = Theme.Inset, BackColor = Theme.Card, Radius = 8 * Sc.F }, 8, top + 4, rw, AppRowH - 8);
 
-            // On/off: whether this app opens automatically in TV mode (it stays in the list either way).
-            var enabled = Place(row, new Toggle { Surface = Theme.Inset, Text = "", AccessibleName = "Open " + name + " in TV mode" },
-                10, 7, 44, 26);
-            enabled.SetQuietly(app.OpenInTv);
-            new ToolTip().SetToolTip(enabled, "Open " + name + " automatically in TV mode");
-
-            const float textX = 100;
+            const float textX = 48, btnW = RowButtonW, switchW = 44;
             var icon = AppCatalog.IconFor(app.Path, Sc.S(24));
-            var pic = Place(row, new PictureBox { Image = icon, SizeMode = PictureBoxSizeMode.Zoom, BackColor = Theme.Inset }, 64, 8, 24, 24);
+            var pic = Place(row, new PictureBox { Image = icon, SizeMode = PictureBoxSizeMode.Zoom, BackColor = Theme.Inset }, 12, 8, 24, 24);
             row.Disposed += delegate { if (icon != null) icon.Dispose(); };
 
             bool canClose = AppLauncher.CanClose(app.Path);
-            const float toggleW = 164, btnW = 30;
-            float buttonsW = btnW * 2 + 4;
-            float textW = rw - textX - toggleW - buttonsW - 24;
+            float textW = SwitchColX(rw, 0) - textX - 8;
             var title = AddLabel(row, name, textX, 2, textW, 20, Sc.Font(13.5f, true), Theme.Fg);
-            var hint = AddLabel(row, "", textX, 21, textW, 18, Sc.Font(11.5f), Theme.Muted);
+            var summary = AddLabel(row, "", textX, 21, textW, 18, Sc.Font(11.5f), Theme.Muted);
+
+            // Column 1: does this app open automatically in TV mode? (It stays in the list either way.)
+            var open = Place(row, new Toggle { Surface = Theme.Inset, Text = "", AccessibleName = "Open " + name + " in TV mode" },
+                SwitchColX(rw, 0) + (SwitchColW - switchW) / 2, 7, switchW, 26);
+            open.SetQuietly(app.OpenInTv);
+            new ToolTip().SetToolTip(open, "On: " + name + " opens automatically when you switch to TV mode.\nOff: it stays in the list but doesn't open.");
+
+            // Column 2: close it again when going back to PC mode?
+            var close = Place(row, new Toggle { Surface = Theme.Inset, Text = "", AccessibleName = "Close " + name + " in PC mode" },
+                SwitchColX(rw, 1) + (SwitchColW - switchW) / 2, 7, switchW, 26);
+            close.SetQuietly(canClose && app.CloseOnPc);
+            var closeTip = new ToolTip();
 
             Image faded = null;
             row.Disposed += delegate { if (faded != null) faded.Dispose(); };
             Action showState = delegate
             {
                 title.ForeColor = app.OpenInTv ? Theme.Fg : Theme.Muted;
-                hint.Text = app.OpenInTv ? HintFor(app, canClose) : "Off - won't open in TV mode";
+                summary.Text = Summary(app, canClose);
+                summary.ForeColor = app.OpenInTv ? Theme.Muted : Theme.Faint;
                 if (icon != null && !app.OpenInTv && faded == null) faded = Faded(icon);
                 pic.Image = app.OpenInTv ? icon : faded;
+
+                // Closing only matters for an app that opens, and only some apps can be closed.
+                close.Enabled = canClose && app.OpenInTv;
+                closeTip.SetToolTip(close,
+                    !canClose ? "Store apps and web links can't be closed automatically - close it yourself."
+                    : !app.OpenInTv ? "Turn on \"Open in TV mode\" first."
+                    : AppLauncher.IsSteam(app.Path) ? "On: leaves Big Picture when you go back to PC mode (and quits Steam if TV mode started it).\nOff: Big Picture stays open."
+                    : "On: closes " + name + " when you go back to PC mode (only the copy TV mode opened).\nOff: it stays open.");
             };
             showState();
-            enabled.CheckedChanged += delegate
+
+            open.CheckedChanged += delegate
             {
-                app.OpenInTv = enabled.Checked;
+                app.OpenInTv = open.Checked;
                 SaveQuietly();
                 showState();
                 SetStatus(app.OpenInTv ? name + " will open in TV mode." : name + " won't open in TV mode. It stays in the list - switch it back on any time.", false);
             };
-
-            var close = Place(row, new Toggle { Font = Sc.Font(12.5f), ForeColor = Theme.Fg, Surface = Theme.Inset },
-                rw - 12 - buttonsW - 8 - toggleW, 7, toggleW, 26);
-            if (canClose)
+            close.CheckedChanged += delegate
             {
-                close.Text = "Close in PC mode";
-                close.SetQuietly(app.CloseOnPc);
-                close.CheckedChanged += delegate
-                {
-                    app.CloseOnPc = close.Checked;
-                    SaveQuietly();
-                    SetStatus(close.Checked ? name + " will be closed when going back to PC mode." : name + " will stay open in PC mode.", false);
-                };
-                new ToolTip().SetToolTip(close, AppLauncher.IsSteam(app.Path)
-                    ? "Leaves Big Picture when going back to PC mode, and quits Steam if TV mode started it"
-                    : "Closes " + name + " when going back to PC mode (only if TV mode opened it)");
-            }
-            else
-            {
-                close.Text = "Stays open";
-                close.SetQuietly(false);
-                close.Enabled = false;
-                new ToolTip().SetToolTip(close, "Store apps and web links can't be closed automatically");
-            }
+                app.CloseOnPc = close.Checked;
+                SaveQuietly();
+                showState();
+                SetStatus(close.Checked ? name + " will close when you go back to PC mode." : name + " will stay open in PC mode.", false);
+            };
 
             var options = Place(row, new FlatButton { Style = FlatButton.Kind.Icon, Glyph = "", GlyphFont = Sc.Icons(13), Text = "Start options" },
                 rw - 12 - btnW * 2 - 4, 5, btnW, 30);
             options.Click += delegate { EditAppOptions(app); };
-            new ToolTip().SetToolTip(options, "Start options");
+            new ToolTip().SetToolTip(options, string.IsNullOrEmpty(app.Args) ? "Start options" : "Start options: " + app.Args);
 
             var remove = Place(row, new FlatButton { Style = FlatButton.Kind.Icon, Glyph = "", GlyphFont = Sc.Icons(12), Text = "Remove " + name },
                 rw - 12 - btnW, 5, btnW, 30);
@@ -309,12 +327,14 @@ namespace TVMode
             return bmp;
         }
 
-        static string HintFor(TvApp app, bool canClose)
+        /// <summary>What happens to this app, in one plain sentence that follows the two switches.</summary>
+        static string Summary(TvApp app, bool canClose)
         {
-            if (AppLauncher.IsSteam(app.Path)) return "Quits Steam only if TV mode started it";
-            if (!canClose)
-                return app.Path.StartsWith("shell:", StringComparison.OrdinalIgnoreCase) ? "Store app - can't be closed automatically" : "Link - can't be closed automatically";
-            return string.IsNullOrEmpty(app.Args) ? "Desktop app" : "Start options: " + app.Args;
+            // Kept short so it fits beside the switches; the column headings carry the rest.
+            if (!app.OpenInTv) return "Won't open in TV mode";
+            if (!canClose) return "Opens in TV · close it yourself";
+            if (!app.CloseOnPc) return "Opens in TV · stays open in PC";
+            return "Opens in TV · closes in PC";
         }
 
         void ShowAddMenu(Control anchor)
