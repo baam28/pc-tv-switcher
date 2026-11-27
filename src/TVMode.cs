@@ -258,6 +258,12 @@ namespace TVMode
         public static extern int RegisterWindowMessage(string name);
 
         [DllImport("user32.dll")]
+        public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        public static extern bool AllowSetForegroundWindow(int processId);
+
+        [DllImport("user32.dll")]
         public static extern bool PostMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 
         [DllImport("dwmapi.dll")]
@@ -527,12 +533,15 @@ namespace TVMode
         /// its picture is turned on, so this waits up to <paramref name="timeoutMs"/> for it.
         /// Blocks - call from a background thread in the UI.
         /// </summary>
-        public static bool SetDefault(string id, int timeoutMs, out string error)
+        /// <param name="cancelled">Checked while waiting; if it turns true (e.g. the switch was undone), gives up quietly:
+        /// returns false with <paramref name="error"/> left null.</param>
+        public static bool SetDefault(string id, int timeoutMs, out string error, Func<bool> cancelled = null)
         {
             error = null;
             DateTime deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
             while (!IsActive(id))
             {
+                if (cancelled != null && cancelled()) return false;
                 if (DateTime.UtcNow > deadline)
                 {
                     error = "The sound output for this mode isn't available.";
@@ -540,6 +549,7 @@ namespace TVMode
                 }
                 Thread.Sleep(500);
             }
+            if (cancelled != null && cancelled()) return false;
 
             var policy = (AudioNative.IPolicyConfig)new AudioNative.PolicyConfigClient();
             try
@@ -707,33 +717,112 @@ namespace TVMode
         }
 
         /// <summary>Turns on exactly the connected displays matching <paramref name="wanted"/> (extended desktop) and turns off the rest.</summary>
-        public static void Apply(Func<DisplayTarget, bool> wanted)
+        // Win32 error codes SetDisplayConfig returns.
+        const int ERROR_ACCESS_DENIED = 5, ERROR_GEN_FAILURE = 31, ERROR_NOT_SUPPORTED = 50,
+                  ERROR_INVALID_PARAMETER = 87, ERROR_BAD_CONFIGURATION = 1610;
+
+        // Valid values for paths we turn on (inactive paths from QueryDisplayConfig carry 0, which Windows rejects).
+        const uint ROTATION_IDENTITY = 1, SCALING_PREFERRED = 128;
+
+        /// <summary>Thrown when Windows won't make the change; the message explains it in plain words.</summary>
+        public class SwitchRefusedException : Exception
+        {
+            public readonly int ErrorCode;
+            public SwitchRefusedException(int code) : base(Explain(code)) { ErrorCode = code; }
+        }
+
+        public static string Explain(int code)
+        {
+            string why;
+            switch (code)
+            {
+                case ERROR_ACCESS_DENIED:
+                    why = "Windows blocked the display change. This happens while the screen is locked, a UAC (admin) prompt is open, or in a Remote Desktop session.";
+                    break;
+                case ERROR_GEN_FAILURE:
+                    why = "The graphics driver couldn't switch screens right now - often because the TV is still waking up. Try again in a few seconds.";
+                    break;
+                case ERROR_INVALID_PARAMETER:
+                case ERROR_BAD_CONFIGURATION:
+                    why = "Windows couldn't find a working setup for these screens. Check the TV is on the right input, then switch again or save the profile's layout again.";
+                    break;
+                case ERROR_NOT_SUPPORTED:
+                    why = "The graphics driver doesn't support this screen combination.";
+                    break;
+                default:
+                    why = "Windows refused the display change.";
+                    break;
+            }
+            return why + " (error " + code + ")";
+        }
+
+        /// <summary>
+        /// Turns on exactly the connected displays matching <paramref name="wanted"/> (extended desktop) and turns off the rest.
+        /// Tries a few ways and, if Windows is busy (TV waking up, driver reconfiguring), tries again shortly after.
+        /// </summary>
+        public static void Apply(Func<DisplayTarget, bool> wanted, bool save = true)
+        {
+            int[] delaysMs = { 0, 500, 1200, 2500 };
+            int err = 0;
+            for (int attempt = 0; attempt < delaysMs.Length; attempt++)
+            {
+                if (delaysMs[attempt] > 0) Thread.Sleep(delaysMs[attempt]);
+                err = TryApply(wanted, save, attempt + 1); // re-reads the hardware every time
+                if (err == Native.ERROR_SUCCESS)
+                {
+                    if (attempt > 0) SwitchLog.Write("Switch succeeded on attempt " + (attempt + 1) + ".");
+                    return;
+                }
+            }
+            SwitchLog.Write("Switch FAILED: " + Explain(err));
+            throw new SwitchRefusedException(err);
+        }
+
+        /// <summary>One attempt: picks a path per wanted screen and tries each way of applying it. Returns the last error.</summary>
+        static int TryApply(Func<DisplayTarget, bool> wanted, bool save, int attempt)
         {
             Native.DISPLAYCONFIG_PATH_INFO[] all;
             Native.DISPLAYCONFIG_MODE_INFO[] modes;
             Query(Native.QDC_ALL_PATHS, out all, out modes);
 
             var targets = BuildTargets(all);
-            var wantedKeys = new HashSet<string>(targets.Where(wanted).Select(t => t.HwKey));
+            var wantedTargets = targets.Where(wanted).ToList();
+            var wantedKeys = new HashSet<string>(wantedTargets.Select(t => t.HwKey));
             if (wantedKeys.Count == 0) throw new Exception("None of the requested displays are connected.");
 
             var chosen = new List<Native.DISPLAYCONFIG_PATH_INFO>();
+            var keptModes = new List<Native.DISPLAYCONFIG_MODE_INFO>();
+            var chosenModes = new List<Native.DISPLAYCONFIG_PATH_INFO>(); // same paths, pointing at keptModes
             var usedSources = new HashSet<string>();
             var doneTargets = new HashSet<string>();
 
             // Pass 1: keep the source already driving a target that stays on (less flicker, keeps its settings).
-            // Pass 2: give each remaining target its own free source so the desktop is extended, not cloned.
-            for (int pass = 0; pass < 2; pass++)
+            // Pass 2: give each remaining target its own free source on the SAME graphics chip as its port
+            //         (cross-chip paths on two-GPU laptops are often refused), so the desktop is extended, not cloned.
+            // Pass 3: any free source, as a last resort.
+            for (int pass = 0; pass < 3; pass++)
             {
                 foreach (var p in all)
                 {
                     if (pass == 0 && !IsActive(p)) continue;
+                    if (pass == 1 && p.sourceInfo.adapterId.ToString() != p.targetInfo.adapterId.ToString()) continue;
                     if (p.targetInfo.targetAvailable == 0) continue;
                     string tk = TargetKey(p), sk = SourceKey(p);
                     if (!wantedKeys.Contains(tk) || doneTargets.Contains(tk) || usedSources.Contains(sk)) continue;
 
                     var np = p;
                     np.flags = Native.DISPLAYCONFIG_PATH_ACTIVE;
+                    np.sourceInfo.statusFlags = 0;   // output-only fields
+                    np.targetInfo.statusFlags = 0;
+                    if (np.targetInfo.rotation == 0) np.targetInfo.rotation = ROTATION_IDENTITY;
+                    if (np.targetInfo.scaling == 0) np.targetInfo.scaling = SCALING_PREFERRED;
+
+                    // A copy that keeps the screen's current resolution if it is already on (third method below).
+                    var withModes = np;
+                    withModes.sourceInfo.modeInfoIdx = KeepMode(p.sourceInfo.modeInfoIdx, modes, keptModes);
+                    withModes.targetInfo.modeInfoIdx = KeepMode(p.targetInfo.modeInfoIdx, modes, keptModes);
+                    chosenModes.Add(withModes);
+
                     np.sourceInfo.modeInfoIdx = Native.DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
                     np.targetInfo.modeInfoIdx = Native.DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
                     chosen.Add(np);
@@ -743,24 +832,74 @@ namespace TVMode
             }
 
             if (doneTargets.Count != wantedKeys.Count)
-                throw new Exception("Could not find a free graphics output for every display.");
+                throw new Exception("Couldn't find a free graphics output for every display.");
 
             var arr = chosen.ToArray();
+            uint saveFlag = save ? Native.SDC_SAVE_TO_DATABASE : 0;
+            string screens = string.Join(", ", wantedTargets.Select(t => t.DisplayName));
+            var tries = new List<string>();
+            int err;
 
-            // Preferred: let Windows look up this monitor combination in its own database,
-            // so resolution, scaling, arrangement and primary display are restored the way you last set them.
-            int err = Native.SetDisplayConfig((uint)arr.Length, arr, 0, null,
-                Native.SDC_APPLY | Native.SDC_TOPOLOGY_SUPPLIED | Native.SDC_ALLOW_PATH_ORDER_CHANGES);
-
-            if (err != Native.ERROR_SUCCESS)
+            // 1) Let Windows look up this screen combination in its own database, so resolution, scaling, arrangement
+            //    and main screen come back the way you last set them. (Skipped for a temporary switch: it would be saved.)
+            if (save)
             {
-                // Fallback for combinations Windows has never seen: let it pick modes itself.
                 err = Native.SetDisplayConfig((uint)arr.Length, arr, 0, null,
-                    Native.SDC_APPLY | Native.SDC_USE_SUPPLIED_DISPLAY_CONFIG | Native.SDC_ALLOW_CHANGES | Native.SDC_SAVE_TO_DATABASE);
+                    Native.SDC_APPLY | Native.SDC_TOPOLOGY_SUPPLIED | Native.SDC_ALLOW_PATH_ORDER_CHANGES);
+                tries.Add("remembered=" + err);
+                if (err == Native.ERROR_SUCCESS) return Log(attempt, screens, tries, err);
             }
 
-            if (err != Native.ERROR_SUCCESS)
-                throw new Exception("Windows refused the display change (SetDisplayConfig error " + err + ").");
+            // 2) A combination Windows has never seen: let it pick resolutions itself.
+            err = Native.SetDisplayConfig((uint)arr.Length, arr, 0, null,
+                Native.SDC_APPLY | Native.SDC_USE_SUPPLIED_DISPLAY_CONFIG | Native.SDC_ALLOW_CHANGES | saveFlag);
+            tries.Add("auto=" + err);
+            if (err == Native.ERROR_SUCCESS) return Log(attempt, screens, tries, err);
+
+            // 3) Keep the current resolution of screens that are already on, let Windows fill in the rest.
+            var withCurrent = chosenModes.ToArray();
+            err = Native.SetDisplayConfig((uint)withCurrent.Length, withCurrent, (uint)keptModes.Count, keptModes.ToArray(),
+                Native.SDC_APPLY | Native.SDC_USE_SUPPLIED_DISPLAY_CONFIG | Native.SDC_ALLOW_CHANGES | saveFlag);
+            tries.Add("keep-current=" + err);
+            return Log(attempt, screens, tries, err);
+        }
+
+        /// <summary>Copies a mode the screen uses now into <paramref name="kept"/>; returns its new index, or "invalid".</summary>
+        static uint KeepMode(uint index, Native.DISPLAYCONFIG_MODE_INFO[] modes, List<Native.DISPLAYCONFIG_MODE_INFO> kept)
+        {
+            if (index == Native.DISPLAYCONFIG_PATH_MODE_IDX_INVALID || index >= modes.Length) return Native.DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
+            kept.Add(modes[index]);
+            return (uint)(kept.Count - 1);
+        }
+
+        static int Log(int attempt, string screens, List<string> tries, int err)
+        {
+            // Only failures (and the attempt that fixed them) are worth keeping.
+            if (err != Native.ERROR_SUCCESS || attempt > 1)
+                SwitchLog.Write("Attempt " + attempt + " for [" + screens + "]: " + string.Join(", ", tries));
+            return err;
+        }
+
+        public static Dictionary<string, string> ActiveScreenNames()
+        {
+            Native.DISPLAYCONFIG_PATH_INFO[] paths;
+            Native.DISPLAYCONFIG_MODE_INFO[] modes;
+            Query(Native.QDC_ONLY_ACTIVE_PATHS, out paths, out modes);
+            var targets = BuildTargets(paths).ToDictionary(t => t.HwKey);
+            var names = new Dictionary<string, string>();
+            foreach (var path in paths)
+            {
+                DisplayTarget target;
+                if (!targets.TryGetValue(TargetKey(path), out target)) continue;
+                var source = new Native.DISPLAYCONFIG_SOURCE_DEVICE_NAME();
+                source.header.type = Native.DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+                source.header.size = (uint)Marshal.SizeOf(typeof(Native.DISPLAYCONFIG_SOURCE_DEVICE_NAME));
+                source.header.adapterId = path.sourceInfo.adapterId;
+                source.header.id = path.sourceInfo.id;
+                if (Native.DisplayConfigGetDeviceInfo(ref source) == Native.ERROR_SUCCESS)
+                    names[target.Key] = source.viewGdiDeviceName;
+            }
+            return names;
         }
 
         public const int BatteryRefreshHz = 60;
@@ -882,7 +1021,7 @@ namespace TVMode
         /// so each saved screen is matched to its current hardware by its monitor ID first.
         /// Returns false if the snapshot no longer fits the hardware (caller then falls back to <see cref="Apply"/>).
         /// </summary>
-        public static bool ApplyLayout(SavedLayout layout)
+        public static bool ApplyLayout(SavedLayout layout, bool save = true)
         {
             Native.DISPLAYCONFIG_PATH_INFO[] all;
             Native.DISPLAYCONFIG_MODE_INFO[] current;
@@ -926,7 +1065,10 @@ namespace TVMode
             }
 
             int err = Native.SetDisplayConfig((uint)paths.Length, paths, (uint)modes.Length, modes,
-                Native.SDC_APPLY | Native.SDC_USE_SUPPLIED_DISPLAY_CONFIG | Native.SDC_SAVE_TO_DATABASE | Native.SDC_ALLOW_CHANGES);
+                Native.SDC_APPLY | Native.SDC_USE_SUPPLIED_DISPLAY_CONFIG | Native.SDC_ALLOW_CHANGES
+                | (save ? Native.SDC_SAVE_TO_DATABASE : 0));
+            if (err != Native.ERROR_SUCCESS)
+                SwitchLog.Write("Saved layout [" + layout.Summary + "] refused with error " + err + "; falling back to a normal switch.");
             return err == Native.ERROR_SUCCESS;
         }
     }
@@ -970,8 +1112,10 @@ namespace TVMode
         public static uint HotkeyMods = Native.MOD_CONTROL | Native.MOD_ALT;
         public static uint HotkeyKey = (uint)Keys.T;
         public static bool LaptopRefreshFollowsPower = true;
+        public static bool ConfirmTvSwitch = true; // ask "Keep this setup?" after switching to TV mode; go back if unanswered
         public static List<TvApp> TvApps = new List<TvApp>(); // apps to open in TV mode, in order
         public static Mode LastMode = Mode.Unknown; // last mode switched to (tie-break when both profiles match)
+        public static bool SetupPending;
 
         static string Clean(string s) { return (s ?? "").Replace('\t', ' ').Replace('\r', ' ').Replace('\n', ' ').Trim(); }
 
@@ -1020,6 +1164,8 @@ namespace TVMode
         public static void Load()
         {
             bool hasProfiles = false, hasAppList = false;
+            bool firstRun = !File.Exists(FilePath);
+            SetupPending = firstRun;
             string TvAppPath = "", TvAppArgs = "", TvAppName = "";
             bool TvAppClose = true;
             string legacyTvKey = null, legacyTvName = null;
@@ -1040,6 +1186,7 @@ namespace TVMode
                             case "PcScreen": Pc.Screens.Add(ParseScreen(v)); hasProfiles = true; break;
                             case "TvScreen": Tv.Screens.Add(ParseScreen(v)); hasProfiles = true; break;
                             case "Profiles": hasProfiles = true; break;
+                            case "SetupPending": SetupPending = v.Trim() == "1"; break;
                             case "PcAudioId": Pc.AudioId = v.Trim(); break;
                             case "PcAudioName": Pc.AudioName = v.Trim(); break;
                             case "TvAudioId": Tv.AudioId = v.Trim(); break;
@@ -1047,6 +1194,7 @@ namespace TVMode
                             case "HotkeyMods": if (uint.TryParse(v, out u)) HotkeyMods = u; break;
                             case "HotkeyKey": if (uint.TryParse(v, out u) && u != 0) HotkeyKey = u; break;
                             case "LaptopRefreshFollowsPower": LaptopRefreshFollowsPower = v.Trim() != "0"; break;
+                            case "ConfirmTvSwitch": ConfirmTvSwitch = v.Trim() != "0"; break;
                             case "TvAppPath": TvAppPath = v.Trim(); break;
                             case "TvAppArgs": TvAppArgs = v.Trim(); break;
                             case "TvAppName": TvAppName = v.Trim(); break;
@@ -1062,7 +1210,8 @@ namespace TVMode
                                             Name = p[0].Trim(), Path = p[1].Trim(), Args = p.Length > 2 ? p[2].Trim() : "",
                                             CloseOnPc = p.Length <= 3 || p[3].Trim() != "0",
                                             WaitForPrimary = p.Length > 4 && p[4].Trim() == "1",
-                                            WaitForAudio = p.Length > 5 && p[5].Trim() == "1"
+                                            WaitForAudio = p.Length > 5 && p[5].Trim() == "1",
+                                            OpenInTv = p.Length <= 6 || p[6].Trim() != "0"
                                         });
                                     hasAppList = true;
                                     break;
@@ -1093,13 +1242,14 @@ namespace TVMode
             catch { }
             if (!string.IsNullOrEmpty(legacyTvKey))
                 Tv.Screens.Add(new ScreenRef { Key = legacyTvKey, Name = legacyTvName ?? "TV" });
-            try { Save(); } catch { }
+            if (!firstRun) { try { Save(); } catch { } }
         }
 
         public static void Save()
         {
             Directory.CreateDirectory(Dir);
             var lines = new List<string> { "Profiles=1" };
+            lines.Add("SetupPending=" + (SetupPending ? "1" : "0"));
             foreach (var s in Pc.Screens) lines.Add("PcScreen=" + s.Key + "\t" + s.Name);
             foreach (var s in Tv.Screens) lines.Add("TvScreen=" + s.Key + "\t" + s.Name);
             lines.Add("PcAudioId=" + Pc.AudioId);
@@ -1109,11 +1259,13 @@ namespace TVMode
             lines.Add("HotkeyMods=" + HotkeyMods);
             lines.Add("HotkeyKey=" + HotkeyKey);
             lines.Add("LaptopRefreshFollowsPower=" + (LaptopRefreshFollowsPower ? "1" : "0"));
+            lines.Add("ConfirmTvSwitch=" + (ConfirmTvSwitch ? "1" : "0"));
             lines.Add("LastMode=" + (LastMode == Mode.TV ? "TV" : LastMode == Mode.PC ? "PC" : ""));
             lines.Add("TvApps=1"); // marks the list format, so an empty list stays empty
             foreach (var a in TvApps)
                 lines.Add("TvApp=" + Clean(a.Name) + "\t" + Clean(a.Path) + "\t" + Clean(a.Args) + "\t" + (a.CloseOnPc ? "1" : "0")
-                    + "\t" + (a.WaitForPrimary ? "1" : "0") + "\t" + (a.WaitForAudio ? "1" : "0"));
+                    + "\t" + (a.WaitForPrimary ? "1" : "0") + "\t" + (a.WaitForAudio ? "1" : "0")
+                    + "\t" + (a.OpenInTv ? "1" : "0"));
             WriteLayout(lines, "Pc", Pc);
             WriteLayout(lines, "Tv", Tv);
             File.WriteAllLines(FilePath, lines);
@@ -1228,6 +1380,39 @@ namespace TVMode
         }
     }
 
+    // ------------------------------------------------------------------ Switch log
+    /// <summary>
+    /// Short record of display switches that Windows refused (and retries that fixed them), in
+    /// %APPDATA%\TVMode\switch.log, so a "sometimes it doesn't switch" problem can be traced afterwards.
+    /// </summary>
+    static class SwitchLog
+    {
+        static readonly object gate = new object();
+        const long MaxBytes = 128 * 1024;
+
+        public static string FilePath { get { return Path.Combine(Settings.Dir, "switch.log"); } }
+
+        public static void Write(string line)
+        {
+            try
+            {
+                lock (gate)
+                {
+                    Directory.CreateDirectory(Settings.Dir);
+                    var info = new FileInfo(FilePath);
+                    if (info.Exists && info.Length > MaxBytes)
+                    {
+                        // Keep the newer half.
+                        var lines = File.ReadAllLines(FilePath);
+                        File.WriteAllLines(FilePath, lines.Skip(lines.Length / 2));
+                    }
+                    File.AppendAllText(FilePath, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  " + line + Environment.NewLine);
+                }
+            }
+            catch { } // logging must never break a switch
+        }
+    }
+
     // ------------------------------------------------------------------ TV apps
     /// <summary>One app to open in TV mode.</summary>
     class TvApp
@@ -1236,6 +1421,7 @@ namespace TVMode
         public string Path = "";       // .exe, shortcut, steam:// link or shell:AppsFolder\... Store app
         public string Args = "";
         public bool CloseOnPc = true;  // close it again when going back to PC mode
+        public bool OpenInTv = true;   // off = stays in the list but doesn't open automatically in TV mode
         public bool WaitForPrimary;
         public bool WaitForAudio;
 
@@ -1576,7 +1762,8 @@ namespace TVMode
         static void RunBatch(bool open, IEnumerable<TvApp> apps, Action<Result> report, HashSet<string> tvKeys,
             string audioId, Func<bool> cancelled)
         {
-            var groups = apps.Where(a => !string.IsNullOrEmpty(a.Path) && (open || a.CloseOnPc))
+            // Opening skips apps switched off for TV mode; closing still covers them, in case one was opened before it was switched off.
+            var groups = apps.Where(a => !string.IsNullOrEmpty(a.Path) && (open ? a.OpenInTv : a.CloseOnPc))
                 .GroupBy(a => ProcessNameFor(a.Path) ?? a.Key, StringComparer.OrdinalIgnoreCase);
             var threads = new List<Thread>();
             foreach (var group in groups)
@@ -1639,16 +1826,31 @@ namespace TVMode
         /// <summary>Sent by a second launch so the running copy brings its window to the front.</summary>
         public static readonly int ShowWindowMessage = Native.RegisterWindowMessage("TVMode_ShowWindow_7b3f");
 
+        /// <summary>Sent by a desktop shortcut so the running copy does the switch (wParam = <see cref="CommandCode"/>).</summary>
+        public static readonly int SwitchCommandMessage = Native.RegisterWindowMessage("TVMode_SwitchCommand_7b3f");
+
+        static readonly string[] switchCommands = { "", "pc", "tv", "tv-no-apps", "toggle" };
+
+        /// <summary>1-4 for a switch command, 0 for anything else.</summary>
+        public static int CommandCode(string cmd) { int i = Array.IndexOf(switchCommands, cmd); return i < 0 ? 0 : i; }
+
+        public static string CommandName(int code) { return code > 0 && code < switchCommands.Length ? switchCommands[code] : null; }
+
         [STAThread]
         static int Main(string[] args)
         {
             Settings.Load();
             string cmd = args.Length > 0 ? args[0].Trim().TrimStart('-', '/').ToLowerInvariant() : "";
 
-            // Command-line use: TVMode.exe pc | tv | toggle | list
-            if (cmd == "pc" || cmd == "tv" || cmd == "toggle" || cmd == "list")
+            // Command-line use: TVMode.exe pc | tv | tv-no-apps | toggle | list
+            bool isSwitch = CommandCode(cmd) != 0;
+            bool hasConsole = (isSwitch || cmd == "list") && Native.AttachConsole(-1);
+
+            // From a terminal or script: switch right here and print what happened.
+            // From a desktop shortcut or Explorer (no console) it falls through to the app below instead, so the switch
+            // looks and behaves exactly like the hotkey: on-screen message, "Keep this setup?", apps, tray status.
+            if (cmd == "list" || (isSwitch && hasConsole))
             {
-                Native.AttachConsole(-1);
                 try
                 {
                     if (cmd == "list")
@@ -1670,41 +1872,21 @@ namespace TVMode
                         }
                         Console.WriteLine("TV apps:" + (Settings.TvApps.Count == 0 ? " (none)" : ""));
                         foreach (var a in Settings.TvApps)
-                            Console.WriteLine("  " + AppLauncher.NameOf(a) + (a.CloseOnPc && AppLauncher.CanClose(a.Path)
-                                ? "  (auto-close in PC mode)" : "  (kept open in PC mode)"));
+                            Console.WriteLine("  " + AppLauncher.NameOf(a) + (a.OpenInTv ? "" : "  (off - doesn't open in TV mode)")
+                                + (a.CloseOnPc && AppLauncher.CanClose(a.Path) ? "  (auto-close in PC mode)" : "  (kept open in PC mode)"));
                         return 0;
                     }
-                    Mode mode = cmd == "pc" ? Mode.PC : cmd == "tv" ? Mode.TV : Modes.Opposite();
-                    string refreshNote;
-                    Modes.Switch(mode, out refreshNote);
-                    Console.WriteLine("Switched to " + Modes.Name(mode) + " mode.");
-                    if (refreshNote != null) Console.WriteLine(refreshNote);
-                    var prof = Settings.For(mode);
-                    System.Threading.Tasks.Task sound = null;
-                    if (!string.IsNullOrEmpty(prof.AudioId))
-                    {
-                        sound = System.Threading.Tasks.Task.Factory.StartNew(delegate
-                        {
-                            string err;
-                            if (AudioManager.SetDefault(prof.AudioId, 10000, out err))
-                                Console.WriteLine("Sound: " + prof.AudioName);
-                            else
-                                Console.Error.WriteLine("Sound: " + err);
-                        });
-                    }
-                    if (Settings.TvApps.Count > 0)
-                    {
-                        if (mode == Mode.TV) Thread.Sleep(1200); // let the TV finish switching so the apps open there
-                        var printLock = new object();
-                        AppLauncher.RunAll(mode == Mode.TV, Settings.TvApps, prof.Keys, prof.AudioId,
-                            r => { lock (printLock) (r.Error ? Console.Error : Console.Out).WriteLine(r.Message); });
-                    }
-                    if (sound != null) sound.GetAwaiter().GetResult();
+                    if (!SetupSession.TryEnter())
+                        throw new InvalidOperationException("Finish or close the setup wizard before switching modes.");
+                    try { SwitchFromCommandLine(cmd); }
+                    finally { SetupSession.Exit(); }
                     return 0;
                 }
                 catch (Exception ex)
                 {
                     Console.Error.WriteLine("Error: " + ex.Message);
+                    if (!hasConsole && cmd != "list")
+                        MessageBox.Show(ex.Message, AppName, MessageBoxButtons.OK, MessageBoxIcon.Error);
                     return 1;
                 }
             }
@@ -1714,15 +1896,53 @@ namespace TVMode
             {
                 if (!createdNew)
                 {
-                    // Already running (maybe hidden in the tray): ask that copy to show its window.
-                    if (cmd != "tray") Native.PostMessage((IntPtr)0xFFFF /* HWND_BROADCAST */, ShowWindowMessage, IntPtr.Zero, IntPtr.Zero);
+                    if (isSwitch)
+                    {
+                        // Hand the switch to the copy already running (usually in the tray). This process was started
+                        // by a click, so it may bring windows to the front: pass that on, so "Keep this setup?" gets focus.
+                        Native.AllowSetForegroundWindow(-1 /* ASFW_ANY */);
+                        Native.PostMessage((IntPtr)0xFFFF /* HWND_BROADCAST */, SwitchCommandMessage, (IntPtr)CommandCode(cmd), IntPtr.Zero);
+                    }
+                    // Otherwise: ask that copy to show its window.
+                    else if (cmd != "tray") Native.PostMessage((IntPtr)0xFFFF /* HWND_BROADCAST */, ShowWindowMessage, IntPtr.Zero, IntPtr.Zero);
                     return 0;
                 }
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
-                Application.Run(new MainForm(cmd == "tray"));
+                // Not running yet: a shortcut starts the app in the tray and switches straight away.
+                Application.Run(new MainForm(cmd == "tray" || isSwitch, isSwitch ? cmd : null));
             }
             return 0;
+        }
+
+        static void SwitchFromCommandLine(string cmd)
+        {
+            Mode mode = cmd == "pc" ? Mode.PC : cmd == "toggle" ? Modes.Opposite() : Mode.TV;
+            string refreshNote;
+            Modes.Switch(mode, out refreshNote);
+            Console.WriteLine("Switched to " + Modes.Name(mode) + " mode.");
+            if (refreshNote != null) Console.WriteLine(refreshNote);
+            var prof = Settings.For(mode);
+            System.Threading.Tasks.Task sound = null;
+            if (!string.IsNullOrEmpty(prof.AudioId))
+            {
+                sound = System.Threading.Tasks.Task.Factory.StartNew(delegate
+                {
+                    string err;
+                    if (AudioManager.SetDefault(prof.AudioId, 10000, out err))
+                        Console.WriteLine("Sound: " + prof.AudioName);
+                    else
+                        Console.Error.WriteLine("Sound: " + err);
+                });
+            }
+            if (cmd != "tv-no-apps" && Settings.TvApps.Count > 0)
+            {
+                if (mode == Mode.TV) Thread.Sleep(1200); // let the TV finish switching so the apps open there
+                var printLock = new object();
+                AppLauncher.RunAll(mode == Mode.TV, Settings.TvApps, prof.Keys, prof.AudioId,
+                    r => { lock (printLock) (r.Error ? Console.Error : Console.Out).WriteLine(r.Message); });
+            }
+            if (sound != null) sound.GetAwaiter().GetResult();
         }
     }
 }

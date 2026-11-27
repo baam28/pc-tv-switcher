@@ -1,0 +1,4 @@
+# Build output: run build.ps1 to create it. Builds are published on GitHub Releases, not committed.
+TVMode.exe
+TVMode.previous-*.exe
+*.pdb

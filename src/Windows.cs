@@ -32,6 +32,7 @@ namespace TVMode
         Icon appIcon, trayIcon;
         System.Windows.Forms.Timer refreshTimer, displayChangeTimer, statusTimer;
         SettingsDialog settingsDialog;
+        bool setupOpen;
         Thread appWorker;
         volatile int switchVersion;
 
@@ -45,8 +46,12 @@ namespace TVMode
             public DarkCombo Audio;
         }
 
-        public MainForm(bool startHidden) : base(Native.PrimaryDpi())
+        /// <summary>A switch to run as soon as the app is up (it was started by a desktop shortcut), or null.</summary>
+        string startCommand;
+
+        public MainForm(bool startHidden, string startCommand = null) : base(Native.PrimaryDpi())
         {
+            this.startCommand = startCommand;
             allowShow = !startHidden;
             Text = Program.AppName;
             FormBorderStyle = FormBorderStyle.FixedSingle;
@@ -175,11 +180,22 @@ namespace TVMode
         const int MaxVisibleApps = 3;
         const float AppRowH = 48;
 
-        /// <summary>"Apps to open in TV mode": one row per app with its own close switch. Returns the card height.</summary>
+        // Two switch columns on every app row, under headings at the top of the list.
+        const float SwitchColW = 106, RowButtonW = 30;
+
+        /// <summary>X (in row coordinates) where a switch column starts: 0 = "Open in TV mode", 1 = "Close in PC mode".</summary>
+        static float SwitchColX(float rowWidth, int column)
+        {
+            float buttons = RowButtonW * 2 + 4;
+            return rowWidth - 12 - buttons - 8 - SwitchColW * (2 - column);
+        }
+
+        /// <summary>"Apps for TV mode": one row per app with two labeled switches. Returns the card height.</summary>
         float BuildAppCard(float x, float y, float w)
         {
             var apps = Settings.TvApps;
-            const float headH = 48, footH = 34;
+            float headH = apps.Count > 0 ? 70 : 48;
+            const float footH = 10; // bottom padding
             var workArea = (IsHandleCreated ? Screen.FromHandle(Handle) : Screen.PrimaryScreen).WorkingArea;
             float room = (workArea.Height - (Height - ClientSize.Height)) / Sc.F - y - headH - footH - 46;
             int visible = Math.Max(1, Math.Min(Math.Min(apps.Count, MaxVisibleApps), (int)(room / AppRowH)));
@@ -187,7 +203,7 @@ namespace TVMode
             var card = Place(this, new Card { Radius = 12 * Sc.F }, x, y, w, cardH);
             float iw = w - 32;
 
-            AddLabel(card, "Apps to open in TV mode", 16, 16, iw - 140, 24, Sc.Font(15, true), Theme.Fg);
+            AddLabel(card, "Apps for TV mode", 16, 16, iw - 140, 24, Sc.Font(15, true), Theme.Fg);
             var add = Place(card, new FlatButton { Text = "Add app", Glyph = "", GlyphFont = Sc.Icons(12), Font = Sc.Font(12.5f, true) },
                 w - 16 - 116, 12, 116, 32);
             add.Click += delegate { ShowAddMenu(add); };
@@ -205,8 +221,15 @@ namespace TVMode
             float rowW = w - 16 - (scroll ? SystemInformation.VerticalScrollBarWidth / Sc.F : 0);
             for (int i = 0; i < apps.Count; i++) BuildAppRow(rows, apps[i], i * AppRowH, rowW);
 
-            AddLabel(card, "Apps open a moment after switching to TV mode. Only copies TV mode opened are ever closed.",
-                16, headH + visible * AppRowH + 8, iw, 20, Sc.Font(12), Theme.Muted);
+            if (apps.Count > 0)
+            {
+                // Column headings, lined up over the switches (rows sit 8 + 8 px in from the card edge).
+                float rw = rowW - 16, offset = 16;
+                var headFont = Sc.Font(10.5f, true);
+                AddLabel(card, "APP", offset + 12, 50, 120, 16, headFont, Theme.Muted);
+                AddLabel(card, "OPEN IN TV MODE", offset + SwitchColX(rw, 0), 50, SwitchColW, 16, headFont, Theme.Muted, ContentAlignment.TopCenter);
+                AddLabel(card, "CLOSE IN PC MODE", offset + SwitchColX(rw, 1), 50, SwitchColW, 16, headFont, Theme.Muted, ContentAlignment.TopCenter);
+            }
             return cardH;
         }
 
@@ -216,45 +239,67 @@ namespace TVMode
             float rw = w - 16;
             var row = Place(rows, new Card { Fill = Theme.Inset, BackColor = Theme.Card, Radius = 8 * Sc.F }, 8, top + 4, rw, AppRowH - 8);
 
+            const float textX = 48, btnW = RowButtonW, switchW = 44;
             var icon = AppCatalog.IconFor(app.Path, Sc.S(24));
-            Place(row, new PictureBox { Image = icon, SizeMode = PictureBoxSizeMode.Zoom, BackColor = Theme.Inset }, 12, 8, 24, 24);
+            var pic = Place(row, new PictureBox { Image = icon, SizeMode = PictureBoxSizeMode.Zoom, BackColor = Theme.Inset }, 12, 8, 24, 24);
             row.Disposed += delegate { if (icon != null) icon.Dispose(); };
 
             bool canClose = AppLauncher.CanClose(app.Path);
-            const float toggleW = 164, btnW = 30;
-            float buttonsW = btnW * 2 + 4;
-            float textW = rw - 48 - toggleW - buttonsW - 24;
-            AddLabel(row, name, 48, 2, textW, 20, Sc.Font(13.5f, true), Theme.Fg);
-            AddLabel(row, HintFor(app, canClose), 48, 21, textW, 18, Sc.Font(11.5f), Theme.Muted);
+            float textW = SwitchColX(rw, 0) - textX - 8;
+            var title = AddLabel(row, name, textX, 2, textW, 20, Sc.Font(13.5f, true), Theme.Fg);
+            var summary = AddLabel(row, "", textX, 21, textW, 18, Sc.Font(11.5f), Theme.Muted);
 
-            var close = Place(row, new Toggle { Font = Sc.Font(12.5f), ForeColor = Theme.Fg, Surface = Theme.Inset },
-                rw - 12 - buttonsW - 8 - toggleW, 7, toggleW, 26);
-            if (canClose)
+            // Column 1: does this app open automatically in TV mode? (It stays in the list either way.)
+            var open = Place(row, new Toggle { Surface = Theme.Inset, Text = "", AccessibleName = "Open " + name + " in TV mode" },
+                SwitchColX(rw, 0) + (SwitchColW - switchW) / 2, 7, switchW, 26);
+            open.SetQuietly(app.OpenInTv);
+            new ToolTip().SetToolTip(open, "On: " + name + " opens automatically when you switch to TV mode.\nOff: it stays in the list but doesn't open.");
+
+            // Column 2: close it again when going back to PC mode?
+            var close = Place(row, new Toggle { Surface = Theme.Inset, Text = "", AccessibleName = "Close " + name + " in PC mode" },
+                SwitchColX(rw, 1) + (SwitchColW - switchW) / 2, 7, switchW, 26);
+            close.SetQuietly(canClose && app.CloseOnPc);
+            var closeTip = new ToolTip();
+
+            Image faded = null;
+            row.Disposed += delegate { if (faded != null) faded.Dispose(); };
+            Action showState = delegate
             {
-                close.Text = "Close in PC mode";
-                close.SetQuietly(app.CloseOnPc);
-                close.CheckedChanged += delegate
-                {
-                    app.CloseOnPc = close.Checked;
-                    SaveQuietly();
-                    SetStatus(close.Checked ? name + " will be closed when going back to PC mode." : name + " will stay open in PC mode.", false);
-                };
-                new ToolTip().SetToolTip(close, AppLauncher.IsSteam(app.Path)
-                    ? "Leaves Big Picture when going back to PC mode, and quits Steam if TV mode started it"
-                    : "Closes " + name + " when going back to PC mode (only if TV mode opened it)");
-            }
-            else
+                title.ForeColor = app.OpenInTv ? Theme.Fg : Theme.Muted;
+                summary.Text = Summary(app, canClose);
+                summary.ForeColor = app.OpenInTv ? Theme.Muted : Theme.Faint;
+                if (icon != null && !app.OpenInTv && faded == null) faded = Faded(icon);
+                pic.Image = app.OpenInTv ? icon : faded;
+
+                // Closing only matters for an app that opens, and only some apps can be closed.
+                close.Enabled = canClose && app.OpenInTv;
+                closeTip.SetToolTip(close,
+                    !canClose ? "Store apps and web links can't be closed automatically - close it yourself."
+                    : !app.OpenInTv ? "Turn on \"Open in TV mode\" first."
+                    : AppLauncher.IsSteam(app.Path) ? "On: leaves Big Picture when you go back to PC mode (and quits Steam if TV mode started it).\nOff: Big Picture stays open."
+                    : "On: closes " + name + " when you go back to PC mode (only the copy TV mode opened).\nOff: it stays open.");
+            };
+            showState();
+
+            open.CheckedChanged += delegate
             {
-                close.Text = "Stays open";
-                close.SetQuietly(false);
-                close.Enabled = false;
-                new ToolTip().SetToolTip(close, "Store apps and web links can't be closed automatically");
-            }
+                app.OpenInTv = open.Checked;
+                SaveQuietly();
+                showState();
+                SetStatus(app.OpenInTv ? name + " will open in TV mode." : name + " won't open in TV mode. It stays in the list - switch it back on any time.", false);
+            };
+            close.CheckedChanged += delegate
+            {
+                app.CloseOnPc = close.Checked;
+                SaveQuietly();
+                showState();
+                SetStatus(close.Checked ? name + " will close when you go back to PC mode." : name + " will stay open in PC mode.", false);
+            };
 
             var options = Place(row, new FlatButton { Style = FlatButton.Kind.Icon, Glyph = "", GlyphFont = Sc.Icons(13), Text = "Start options" },
                 rw - 12 - btnW * 2 - 4, 5, btnW, 30);
             options.Click += delegate { EditAppOptions(app); };
-            new ToolTip().SetToolTip(options, "Start options");
+            new ToolTip().SetToolTip(options, string.IsNullOrEmpty(app.Args) ? "Start options" : "Start options: " + app.Args);
 
             var remove = Place(row, new FlatButton { Style = FlatButton.Kind.Icon, Glyph = "", GlyphFont = Sc.Icons(12), Text = "Remove " + name },
                 rw - 12 - btnW, 5, btnW, 30);
@@ -262,12 +307,35 @@ namespace TVMode
             new ToolTip().SetToolTip(remove, "Remove from the list");
         }
 
-        static string HintFor(TvApp app, bool canClose)
+        /// <summary>Grey, see-through copy of an icon, for apps that are switched off.</summary>
+        static Image Faded(Image source)
         {
-            if (AppLauncher.IsSteam(app.Path)) return "Quits Steam only if TV mode started it";
-            if (!canClose)
-                return app.Path.StartsWith("shell:", StringComparison.OrdinalIgnoreCase) ? "Store app - can't be closed automatically" : "Link - can't be closed automatically";
-            return string.IsNullOrEmpty(app.Args) ? "Desktop app" : "Start options: " + app.Args;
+            var bmp = new Bitmap(source.Width, source.Height, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            var m = new System.Drawing.Imaging.ColorMatrix(new[]
+            {
+                new[] { 0.30f, 0.30f, 0.30f, 0, 0 },
+                new[] { 0.59f, 0.59f, 0.59f, 0, 0 },
+                new[] { 0.11f, 0.11f, 0.11f, 0, 0 },
+                new[] { 0f, 0, 0, 0.45f, 0 },
+                new[] { 0f, 0, 0, 0, 1 }
+            });
+            using (var g = Graphics.FromImage(bmp))
+            using (var attrs = new System.Drawing.Imaging.ImageAttributes())
+            {
+                attrs.SetColorMatrix(m);
+                g.DrawImage(source, new Rectangle(0, 0, bmp.Width, bmp.Height), 0, 0, source.Width, source.Height, GraphicsUnit.Pixel, attrs);
+            }
+            return bmp;
+        }
+
+        /// <summary>What happens to this app, in one plain sentence that follows the two switches.</summary>
+        static string Summary(TvApp app, bool canClose)
+        {
+            // Kept short so it fits beside the switches; the column headings carry the rest.
+            if (!app.OpenInTv) return "Won't open in TV mode";
+            if (!canClose) return "Opens in TV mode · you close it";
+            if (!app.CloseOnPc) return "Opens in TV mode · stays open";
+            return "Opens in TV mode · closes in PC mode";
         }
 
         void ShowAddMenu(Control anchor)
@@ -382,6 +450,32 @@ namespace TVMode
             base.OnHandleCreated(e);
             if (!RegisterToggleHotkey())
                 SetStatus("The hotkey " + Settings.HotkeyText + " is already used by another app. Pick another one in Settings.", true);
+            if (startCommand != null)
+            {
+                string cmd = startCommand;
+                startCommand = null;
+                BeginInvoke((MethodInvoker)delegate { RunCommand(cmd); });
+            }
+        }
+
+        /// <summary>Runs a switch asked for by a desktop shortcut, exactly as the hotkey or buttons would.</summary>
+        void RunCommand(string cmd)
+        {
+            if (cmd == null) return;
+            if (setupOpen) { SetStatus("Finish or close the setup wizard before switching modes.", true); return; }
+            Mode mode = cmd == "pc" ? Mode.PC : cmd == "toggle" ? Mode.Unknown : Mode.TV;
+            if (mode == Mode.Unknown)
+            {
+                mode = Mode.TV;
+                try { mode = Modes.Opposite(); } catch { }
+            }
+            DoSwitch(mode, cmd != "tv-no-apps");
+        }
+
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            if (Settings.SetupPending) BeginInvoke((MethodInvoker)OpenSetup);
         }
 
         protected override void WndProc(ref Message m)
@@ -395,6 +489,12 @@ namespace TVMode
             else if (m.Msg == Program.ShowWindowMessage && Program.ShowWindowMessage != 0)
             {
                 ShowWindow();
+                return;
+            }
+            else if (m.Msg == Program.SwitchCommandMessage && Program.SwitchCommandMessage != 0)
+            {
+                string cmd = Program.CommandName(m.WParam.ToInt32());
+                BeginInvoke((MethodInvoker)delegate { RunCommand(cmd); });
                 return;
             }
             base.WndProc(ref m);
@@ -482,15 +582,64 @@ namespace TVMode
             settingsDialog.Show(this);
         }
 
+        public void OpenSetup()
+        {
+            if (setupOpen) return;
+            if ((appWorker != null && appWorker.IsAlive) || !SetupSession.TryEnter())
+            {
+                SetStatus("Wait for the current mode switch to finish before opening setup.", true);
+                return;
+            }
+            setupOpen = true;
+            try
+            {
+                using (var wizard = new SetupWizard(UiNative.DpiOf(Handle)))
+                {
+                    wizard.ShowDialog(this);
+                    if (Settings.SetupPending)
+                    {
+                        Settings.SetupPending = false;
+                        SaveQuietly();
+                    }
+                    RefreshAll();
+                    if (!string.IsNullOrEmpty(wizard.ResultMessage))
+                        SetStatus(wizard.ResultMessage, wizard.ResultError);
+                }
+            }
+            finally
+            {
+                setupOpen = false;
+                SetupSession.Exit();
+            }
+        }
+
         // ---------------- switching
+
+        /// <summary>The setup from before the last switch to TV mode, while "Keep this setup?" is waiting for an answer.</summary>
+        PreviousSetup pendingRevert;
 
         void DoSwitch(Mode mode, bool launchApps = true)
         {
+            if (setupOpen) return;
+            if (!SetupSession.TryEnter())
+            {
+                SetStatus("Another mode switch is in progress.", true);
+                return;
+            }
+            // Switching again while "Keep this setup?" is up counts as an answer: keep, then switch.
+            Osd.Dismiss();
+            pendingRevert = null;
             string title = Modes.Name(mode) + " MODE";
             try
             {
                 SetStatus("Switching to " + Modes.Name(mode) + " mode...", false);
                 lblStatus.Update();
+
+                // Safety net: remember the current setup so it can come back if the TV shows no picture.
+                PreviousSetup before = null;
+                if (mode == Mode.TV && Settings.ConfirmTvSwitch && currentMode != Mode.TV)
+                    before = PreviousSetup.Capture();
+
                 string refreshNote;
                 bool usedLayout = Modes.Switch(mode, out refreshNote);
                 switchVersion++;
@@ -500,11 +649,36 @@ namespace TVMode
 
                 var p = Settings.For(mode);
                 bool audio = !string.IsNullOrEmpty(p.AudioId);
-                bool openApps = mode == Mode.TV && launchApps && Settings.TvApps.Count > 0;
+                var appsToOpen = Settings.TvApps.Where(a => a.OpenInTv).ToList();
+                bool openApps = mode == Mode.TV && launchApps && appsToOpen.Count > 0;
                 bool closeApps = mode == Mode.PC && Settings.TvApps.Any(a => a.CloseOnPc);
 
+                // Ask "Keep this setup?" on the new screen. Apps wait for the answer: a full-screen app like Steam Big
+                // Picture would cover the question, and there's no point opening apps on a screen with no picture.
+                Osd.Confirm question = null;
+                if (before != null)
+                {
+                    pendingRevert = before;
+                    question = new Osd.Confirm
+                    {
+                        Keep = delegate
+                        {
+                            if (pendingRevert != before) return;
+                            pendingRevert = null;
+                            SetStatus("Kept TV mode.", false);
+                            if (openApps) RunAppsInBackground(true);
+                        },
+                        Revert = delegate
+                        {
+                            if (pendingRevert != before) return;
+                            pendingRevert = null;
+                            RevertSwitch(before);
+                        }
+                    };
+                }
+
                 // Screens go blank for a moment during the switch; show the message once they're back.
-                ShowOsdSoon(mode, title, usedLayout ? "Saved layout restored" : "");
+                ShowOsdSoon(mode, title, usedLayout ? "Saved layout restored" : "", question);
                 if (!launchApps) SetOsdLine(1, "App launches skipped", false);
                 if (audio)
                 {
@@ -513,16 +687,23 @@ namespace TVMode
                 }
                 if (openApps)
                 {
-                    SetOsdLine(1, "Opening " + (Settings.TvApps.Count == 1 ? AppLauncher.NameOf(Settings.TvApps[0]) : Settings.TvApps.Count + " apps") + "...", false);
-                    RunAppsInBackground(true);
+                    string names = appsToOpen.Count == 1 ? AppLauncher.NameOf(appsToOpen[0]) : appsToOpen.Count + " apps";
+                    if (question != null) SetOsdLine(1, names + " will open when you keep this", false);
+                    else
+                    {
+                        SetOsdLine(1, "Opening " + names + "...", false);
+                        RunAppsInBackground(true);
+                    }
                 }
                 else if (closeApps) RunAppsInBackground(false);
             }
             catch (Exception ex)
             {
-                SetStatus(ex.Message, true);
+                bool refused = ex is DisplayManager.SwitchRefusedException;
+                SetStatus(ex.Message + (refused ? " Details: " + SwitchLog.FilePath : ""), true);
                 Osd.ShowMessage(Mode.Unknown, "Couldn't switch", ex.Message, true);
             }
+            finally { SetupSession.Exit(); }
             RefreshAll();
             refreshTimer.Stop();
             refreshTimer.Start();
@@ -542,7 +723,7 @@ namespace TVMode
             return lines.Count > 0 ? string.Join("\n", lines) : osdBase;
         }
 
-        void ShowOsdSoon(Mode mode, string title, string baseDetail)
+        void ShowOsdSoon(Mode mode, string title, string baseDetail, Osd.Confirm question = null)
         {
             if (osdDelay != null) { osdDelay.Stop(); osdDelay.Dispose(); }
             osdMode = mode;
@@ -556,9 +737,40 @@ namespace TVMode
                 osdDelay.Stop();
                 osdDelay.Dispose();
                 osdDelay = null;
-                Osd.ShowMessage(osdMode, osdTitle, OsdDetail(), osdError);
+                Osd.ShowMessage(osdMode, osdTitle, OsdDetail(), osdError, question);
             };
             osdDelay.Start();
+        }
+
+        /// <summary>"Go back" (or no answer): restores the screens, sound and mode from before the switch to TV mode.</summary>
+        void RevertSwitch(PreviousSetup before)
+        {
+            if (!SetupSession.TryEnter())
+            {
+                SetStatus("Couldn't go back: another switch is in progress.", true);
+                return;
+            }
+            try
+            {
+                switchVersion++; // stops a TV sound switch that's still waiting in the background
+                string warning = before.Restore();
+                Settings.LastMode = before.LastMode;
+                SaveQuietly();
+                if (Settings.LaptopRefreshFollowsPower)
+                {
+                    try { DisplayManager.ApplyLaptopRefreshForPower(); } catch { }
+                }
+                string msg = "Your previous screens are back." + (warning != null ? " " + warning : "");
+                SetStatus(msg, warning != null);
+                Osd.ShowMessage(before.LastMode == Mode.PC ? Mode.PC : Mode.Unknown, "Went back", msg, warning != null);
+            }
+            catch (Exception ex)
+            {
+                SetStatus("Couldn't go back: " + ex.Message, true);
+                Osd.ShowMessage(Mode.Unknown, "Couldn't go back", ex.Message, true);
+            }
+            finally { SetupSession.Exit(); }
+            RefreshAll();
         }
 
         /// <summary>Sets one line of the message, whether it is still waiting to appear or already up. False if it already closed.</summary>
@@ -573,12 +785,16 @@ namespace TVMode
         void SwitchAudioInBackground(string id, string name, string prefix, bool fromSwitch)
         {
             SetStatus(prefix + "Waiting for sound output: " + name + "...", false);
+            int version = switchVersion;
             ThreadPool.QueueUserWorkItem(delegate
             {
                 string err;
                 bool ok;
-                try { ok = AudioManager.SetDefault(id, 10000, out err); }
+                // Gives up quietly if the switch is undone or replaced meanwhile ("Go back" restores the old sound).
+                Func<bool> undone = () => fromSwitch && version != switchVersion;
+                try { ok = AudioManager.SetDefault(id, 10000, out err, undone); }
                 catch (Exception ex) { ok = false; err = ex.Message; }
+                if (!ok && err == null) return;
                 if (err != null && !ok) err = err + " (" + name + ")";
                 try
                 {
@@ -608,7 +824,7 @@ namespace TVMode
             int version = switchVersion;
             var apps = Settings.TvApps.Select(a => new TvApp
             {
-                Name = a.Name, Path = a.Path, Args = a.Args, CloseOnPc = a.CloseOnPc,
+                Name = a.Name, Path = a.Path, Args = a.Args, CloseOnPc = a.CloseOnPc, OpenInTv = a.OpenInTv,
                 WaitForPrimary = a.WaitForPrimary, WaitForAudio = a.WaitForAudio
             }).ToList();
             var tvKeys = Settings.Tv.Keys;
@@ -649,7 +865,7 @@ namespace TVMode
             else if (results.Count == 1)
                 line = r.Message;
             else
-                line = (open ? "TV apps processed: " : "Apps closed: ") + results.Count;
+                line = (open ? "Opened " : "Closed ") + results.Count + " apps";
             if (!SetOsdLine(1, line, errors.Count > 0) && r.Error)
                 Osd.ShowMessage(Mode.Unknown, open ? "App not opened" : "App still open", r.Message, true);
         }
@@ -672,7 +888,7 @@ namespace TVMode
         void SaveQuietly()
         {
             try { Settings.Save(); }
-            catch (Exception ex) { SetStatus("Could not save settings: " + ex.Message, true); }
+            catch (Exception ex) { SetStatus("Couldn't save settings: " + ex.Message, true); }
         }
 
         // ---------------- profile editing
@@ -814,7 +1030,7 @@ namespace TVMode
             if (pcUi == null) return;
             List<AudioDevice> outputs;
             try { outputs = AudioManager.GetOutputs(); }
-            catch (Exception ex) { SetStatus("Could not read sound devices: " + ex.Message, true); return; }
+            catch (Exception ex) { SetStatus("Couldn't read sound devices: " + ex.Message, true); return; }
             if (pcUi.Audio.DroppedDown || tvUi.Audio.DroppedDown) return;
             bool wasLoading = loading;
             loading = true;
@@ -866,6 +1082,57 @@ namespace TVMode
         }
     }
 
+    /// <summary>The screens, sound output and mode in use before a switch, so "Go back" can restore them.</summary>
+    class PreviousSetup
+    {
+        public SavedLayout Layout;
+        public string AudioId;
+        public Mode LastMode;
+
+        /// <summary>Snapshot of what's on now, or null if it can't be read (then the switch simply isn't confirmed).</summary>
+        public static PreviousSetup Capture()
+        {
+            try
+            {
+                var p = new PreviousSetup { Layout = DisplayManager.CaptureLayout(), LastMode = Settings.LastMode };
+                try { p.AudioId = AudioManager.GetDefaultId(); } catch { }
+                return p;
+            }
+            catch (Exception ex)
+            {
+                SwitchLog.Write("Couldn't remember the current setup before switching, so the switch won't ask to confirm: " + ex.Message);
+                return null;
+            }
+        }
+
+        /// <summary>Puts the screens and sound back (same way the setup wizard does). Returns a warning, or null if all went back.</summary>
+        public string Restore()
+        {
+            string warning = null;
+            bool restored;
+            try { restored = DisplayManager.ApplyLayout(Layout, false); }
+            catch { restored = false; }
+            if (!restored)
+            {
+                // The exact layout no longer fits (a screen was unplugged): turn the same screens back on, Windows picks the layout.
+                var keys = Layout.Keys;
+                DisplayManager.Apply(d => keys.Contains(d.Key), false);
+                warning = "Windows chose the layout for the screens that are still connected.";
+            }
+            if (!string.IsNullOrEmpty(AudioId))
+            {
+                try
+                {
+                    string error;
+                    if (AudioManager.GetDefaultId() != AudioId && !AudioManager.SetDefault(AudioId, 3000, out error))
+                        warning = (warning != null ? warning + " " : "") + "Couldn't restore the sound output. " + error;
+                }
+                catch (Exception ex) { warning = (warning != null ? warning + " " : "") + "Couldn't restore the sound output. " + ex.Message; }
+            }
+            return warning;
+        }
+    }
+
     // ------------------------------------------------------------------ Settings
     class SettingsDialog : ThemedForm
     {
@@ -889,7 +1156,7 @@ namespace TVMode
         {
             ClearUi();
             const float w = 460;
-            ClientSize = new Size(Sc.S(w), Sc.S(348));
+            ClientSize = new Size(Sc.S(w), Sc.S(438));
 
             Caption(this, "Switch hotkey", 24, 22, w - 48);
             hotkey = Place(this, new HotkeyBox { Font = Sc.Font(13, true), Combo = Settings.HotkeyText }, 24, 44, w - 48, 46);
@@ -916,7 +1183,7 @@ namespace TVMode
             startup.CheckedChanged += delegate
             {
                 try { Settings.StartWithWindows = startup.Checked; }
-                catch (Exception ex) { SetHint("Could not change startup setting: " + ex.Message, true); }
+                catch (Exception ex) { SetHint("Couldn't change startup setting: " + ex.Message, true); }
             };
             AddLabel(this, "Runs quietly in the tray, so the hotkey always works.", 74, 186, w - 98, 20, Sc.Font(12), Theme.Muted);
 
@@ -925,7 +1192,7 @@ namespace TVMode
             refresh.CheckedChanged += delegate
             {
                 Settings.LaptopRefreshFollowsPower = refresh.Checked;
-                try { Settings.Save(); } catch (Exception ex) { SetHint("Could not save settings: " + ex.Message, true); return; }
+                try { Settings.Save(); } catch (Exception ex) { SetHint("Couldn't save settings: " + ex.Message, true); return; }
                 if (!refresh.Checked) return;
                 try
                 {
@@ -937,7 +1204,23 @@ namespace TVMode
             AddLabel(this, "Highest rate on the charger, " + DisplayManager.BatteryRefreshHz + "Hz on battery, like G-Helper. Applied after every switch.",
                 74, 244, w - 98, 36, Sc.Font(12), Theme.Muted);
 
-            var done = Place(this, new FlatButton { Style = FlatButton.Kind.Primary, Text = "Done", Font = Sc.Font(13, true) }, w - 24 - 100, 296, 100, 34);
+            var confirm = Place(this, new Toggle { Text = "Ask to keep TV mode", Font = Sc.Font(13), ForeColor = Theme.Fg }, 24, 292, w - 48, 26);
+            confirm.SetQuietly(Settings.ConfirmTvSwitch);
+            confirm.CheckedChanged += delegate
+            {
+                Settings.ConfirmTvSwitch = confirm.Checked;
+                try { Settings.Save(); } catch (Exception ex) { SetHint("Couldn't save settings: " + ex.Message, true); }
+            };
+            AddLabel(this, "After switching to TV mode, press Keep (or Enter). If you don't within 15 seconds - say the TV shows no picture - your previous screens come back.",
+                74, 318, w - 98, 52, Sc.Font(12), Theme.Muted);
+
+            var setup = Place(this, new FlatButton { Text = "Setup wizard", Font = Sc.Font(13) }, 24, 386, 130, 34);
+            setup.Click += delegate
+            {
+                Close();
+                main.BeginInvoke((MethodInvoker)main.OpenSetup);
+            };
+            var done = Place(this, new FlatButton { Style = FlatButton.Kind.Primary, Text = "Done", Font = Sc.Font(13, true) }, w - 24 - 100, 386, 100, 34);
             done.Click += delegate { Close(); };
             ActiveControl = done;
         }
@@ -1201,6 +1484,13 @@ namespace TVMode
                 Native.SetPlaceholder(box, "For example, --fullscreen");
                 y += 76;
             }
+            else
+            {
+                // Explain why there's no arguments box, rather than leaving it to look missing.
+                AddLabel(this, AppLauncher.IsSteam(app.Path) ? "Steam Big Picture doesn't take command-line arguments."
+                    : "Store apps and web links don't take command-line arguments.", 20, y, w - 40, 20, Sc.Font(12.5f), Theme.Muted);
+                y += 34;
+            }
 
             primary = Place(this, new Toggle { Text = "Wait for a TV profile screen to become the main display",
                 Font = Sc.Font(12.5f), ForeColor = Theme.Fg, Surface = BackColor }, 20, y, w - 40, 27);
@@ -1238,21 +1528,48 @@ namespace TVMode
     }
 
     // ------------------------------------------------------------------ On-screen message
-    /// <summary>A large message shown briefly in the middle of the main screen, then faded out. Click-through, never steals focus.</summary>
+    /// <summary>
+    /// A large message shown briefly in the middle of the main screen, then faded out. Click-through, never steals focus.
+    /// With a <see cref="Confirm"/> it instead asks "Keep this setup?" with a countdown, and takes focus so
+    /// Enter keeps and Esc goes back; if nobody answers (e.g. the TV shows no picture), it goes back by itself.
+    /// </summary>
     class Osd : Form
     {
+        public class Confirm
+        {
+            public int Seconds = 15;
+            public Action Keep, Revert;
+        }
+
         static Osd current;
 
         readonly Label lblDetail;
         readonly System.Windows.Forms.Timer timer;
         int elapsed;
-        const int HoldMs = 2200, TickMs = 30;
+        const int TickMs = 30;
+        int holdMs = 2200; // how long the message stays before fading (longer for errors)
 
-        public static void ShowMessage(Mode mode, string title, string detail, bool error)
+        readonly Confirm confirm;
+        Label lblCountdown;
+        bool decided;
+
+        public static void ShowMessage(Mode mode, string title, string detail, bool error, Confirm confirm = null)
         {
+            // A message replaced by a newer one is not an answer: its Keep/Revert simply never run.
             if (current != null && !current.IsDisposed) current.Close();
-            current = new Osd(mode, title, detail, error);
+            current = new Osd(mode, title, detail, error, confirm);
             current.Show();
+            if (confirm != null)
+            {
+                current.Activate();
+                Native.SetForegroundWindow(current.Handle);
+            }
+        }
+
+        /// <summary>Closes a pending "Keep this setup?" question without answering it.</summary>
+        public static void Dismiss()
+        {
+            if (current != null && !current.IsDisposed && current.confirm != null) { current.decided = true; current.Close(); }
         }
 
         /// <summary>Updates the second line if the message is still up. Returns false if it already closed.</summary>
@@ -1261,13 +1578,14 @@ namespace TVMode
             if (current == null || current.IsDisposed) return false;
             current.lblDetail.Text = detail;
             if (error) current.lblDetail.ForeColor = Theme.Danger;
-            current.elapsed = 0;
+            if (current.confirm == null) current.elapsed = 0; // don't restart a countdown
             current.Opacity = 0.97;
             return true;
         }
 
-        Osd(Mode mode, string title, string detail, bool error)
+        Osd(Mode mode, string title, string detail, bool error, Confirm confirm)
         {
+            this.confirm = confirm;
             var sc = new Scaler(Native.PrimaryDpi()); // sized for the main screen, where it appears
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
@@ -1276,7 +1594,15 @@ namespace TVMode
             AutoScaleMode = AutoScaleMode.None;
             BackColor = Theme.Card;
             Opacity = 0.97;
-            Size = new Size(sc.S(380), sc.S(196));
+            // Errors carry a plain-language explanation: give them more room, size the box to the text,
+            // and keep them up longer so there's time to read.
+            var detailFont = sc.Font(14.5f);
+            int width = sc.S(error ? 470 : 380);
+            int textH = Math.Max(sc.S(60), TextRenderer.MeasureText(detail ?? "", detailFont, new Size(width - sc.S(40), 0),
+                TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl).Height + sc.S(6));
+            int questionH = confirm != null ? sc.S(100) : 0; // countdown line + buttons
+            Size = new Size(width, sc.S(122) + textH + questionH + sc.S(16));
+            if (error) holdMs = 6000;
 
             var area = Native.PrimaryWorkArea();
             Location = new Point(area.Left + (area.Width - Width) / 2, area.Top + (area.Height - Height) / 2);
@@ -1298,20 +1624,75 @@ namespace TVMode
             });
             lblDetail = new Label
             {
-                Text = detail, Left = sc.S(20), Top = sc.S(122), Width = Width - sc.S(40), Height = sc.S(60), TextAlign = ContentAlignment.TopCenter,
-                Font = sc.Font(14.5f), ForeColor = error ? Theme.Danger : Theme.Muted, BackColor = Theme.Card, UseMnemonic = false
+                Text = detail, Left = sc.S(20), Top = sc.S(122), Width = Width - sc.S(40), Height = textH, TextAlign = ContentAlignment.TopCenter,
+                Font = detailFont, ForeColor = error ? Theme.Danger : Theme.Muted, BackColor = Theme.Card, UseMnemonic = false
             };
             Controls.Add(lblDetail);
+
+            if (confirm != null)
+            {
+                int top = sc.S(122) + textH + sc.S(4);
+                lblCountdown = new Label
+                {
+                    Left = sc.S(20), Top = top, Width = Width - sc.S(40), Height = sc.S(24), TextAlign = ContentAlignment.MiddleCenter,
+                    Font = sc.Font(14, true), ForeColor = Theme.Fg, BackColor = Theme.Card, UseMnemonic = false
+                };
+                Controls.Add(lblCountdown);
+                int bw = sc.S(140), bh = sc.S(40), gap = sc.S(12), by = top + sc.S(38);
+                var back = new FlatButton { Text = "Go back", Font = sc.Font(14), Radius = 10 };
+                back.SetBounds(Width / 2 - gap / 2 - bw, by, bw, bh);
+                back.Click += delegate { Decide(false); };
+                var keep = new FlatButton { Style = FlatButton.Kind.Primary, Text = "Keep", Font = sc.Font(14, true), Radius = 10 };
+                keep.SetBounds(Width / 2 + gap / 2, by, bw, bh);
+                keep.Click += delegate { Decide(true); };
+                Controls.Add(back);
+                Controls.Add(keep);
+                KeyPreview = true;
+                ActiveControl = keep;
+                ShowCountdown();
+            }
 
             timer = new System.Windows.Forms.Timer { Interval = TickMs };
             timer.Tick += delegate
             {
                 elapsed += TickMs;
-                if (elapsed < HoldMs) return;
+                if (confirm != null && !decided)
+                {
+                    ShowCountdown();
+                    if (elapsed >= confirm.Seconds * 1000) Decide(false); // nobody answered: probably no picture
+                    return;
+                }
+                if (elapsed < holdMs) return;
                 Opacity -= 0.07;
                 if (Opacity <= 0.05) { timer.Stop(); Close(); }
             };
             timer.Start();
+        }
+
+        void ShowCountdown()
+        {
+            int left = Math.Max(0, confirm.Seconds - elapsed / 1000);
+            lblCountdown.Text = "Keep this setup?  Going back in " + left + " s";
+        }
+
+        void Decide(bool keep)
+        {
+            if (decided) return;
+            decided = true;
+            timer.Stop();
+            Close();
+            var action = keep ? confirm.Keep : confirm.Revert;
+            if (action != null) action();
+        }
+
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            if (confirm != null && !decided)
+            {
+                if (e.KeyCode == Keys.Escape) { Decide(false); e.Handled = true; }
+                else if (e.KeyCode == Keys.Enter || e.KeyCode == Keys.Space) { Decide(true); e.Handled = e.SuppressKeyPress = true; }
+            }
+            base.OnKeyDown(e);
         }
 
         protected override void OnHandleCreated(EventArgs e)
@@ -1320,17 +1701,18 @@ namespace TVMode
             UiNative.RoundCorners(Handle);
         }
 
-        protected override bool ShowWithoutActivation { get { return true; } }
+        // A plain message never takes focus; the "Keep this setup?" question does, so Enter / Esc work.
+        protected override bool ShowWithoutActivation { get { return confirm == null; } }
 
         protected override CreateParams CreateParams
         {
             get
             {
                 var cp = base.CreateParams;
-                cp.ExStyle |= 0x80        // WS_EX_TOOLWINDOW: no taskbar / Alt+Tab entry
-                            | 0x08000000  // WS_EX_NOACTIVATE: never takes focus from a game or video
-                            | 0x20        // WS_EX_TRANSPARENT: clicks go through
-                            | 0x8;        // WS_EX_TOPMOST
+                cp.ExStyle |= 0x80 | 0x8;     // WS_EX_TOOLWINDOW (no taskbar / Alt+Tab entry), WS_EX_TOPMOST
+                if (confirm == null)
+                    cp.ExStyle |= 0x08000000  // WS_EX_NOACTIVATE: never takes focus from a game or video
+                                | 0x20;       // WS_EX_TRANSPARENT: clicks go through
                 return cp;
             }
         }
