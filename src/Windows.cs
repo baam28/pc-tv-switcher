@@ -32,6 +32,7 @@ namespace TVMode
         Icon appIcon, trayIcon;
         System.Windows.Forms.Timer refreshTimer, displayChangeTimer, statusTimer;
         SettingsDialog settingsDialog;
+        bool setupOpen;
         Thread appWorker;
         volatile int switchVersion;
 
@@ -216,16 +217,41 @@ namespace TVMode
             float rw = w - 16;
             var row = Place(rows, new Card { Fill = Theme.Inset, BackColor = Theme.Card, Radius = 8 * Sc.F }, 8, top + 4, rw, AppRowH - 8);
 
+            // On/off: whether this app opens automatically in TV mode (it stays in the list either way).
+            var enabled = Place(row, new Toggle { Surface = Theme.Inset, Text = "", AccessibleName = "Open " + name + " in TV mode" },
+                10, 7, 44, 26);
+            enabled.SetQuietly(app.OpenInTv);
+            new ToolTip().SetToolTip(enabled, "Open " + name + " automatically in TV mode");
+
+            const float textX = 100;
             var icon = AppCatalog.IconFor(app.Path, Sc.S(24));
-            Place(row, new PictureBox { Image = icon, SizeMode = PictureBoxSizeMode.Zoom, BackColor = Theme.Inset }, 12, 8, 24, 24);
+            var pic = Place(row, new PictureBox { Image = icon, SizeMode = PictureBoxSizeMode.Zoom, BackColor = Theme.Inset }, 64, 8, 24, 24);
             row.Disposed += delegate { if (icon != null) icon.Dispose(); };
 
             bool canClose = AppLauncher.CanClose(app.Path);
             const float toggleW = 164, btnW = 30;
             float buttonsW = btnW * 2 + 4;
-            float textW = rw - 48 - toggleW - buttonsW - 24;
-            AddLabel(row, name, 48, 2, textW, 20, Sc.Font(13.5f, true), Theme.Fg);
-            AddLabel(row, HintFor(app, canClose), 48, 21, textW, 18, Sc.Font(11.5f), Theme.Muted);
+            float textW = rw - textX - toggleW - buttonsW - 24;
+            var title = AddLabel(row, name, textX, 2, textW, 20, Sc.Font(13.5f, true), Theme.Fg);
+            var hint = AddLabel(row, "", textX, 21, textW, 18, Sc.Font(11.5f), Theme.Muted);
+
+            Image faded = null;
+            row.Disposed += delegate { if (faded != null) faded.Dispose(); };
+            Action showState = delegate
+            {
+                title.ForeColor = app.OpenInTv ? Theme.Fg : Theme.Muted;
+                hint.Text = app.OpenInTv ? HintFor(app, canClose) : "Off - won't open in TV mode";
+                if (icon != null && !app.OpenInTv && faded == null) faded = Faded(icon);
+                pic.Image = app.OpenInTv ? icon : faded;
+            };
+            showState();
+            enabled.CheckedChanged += delegate
+            {
+                app.OpenInTv = enabled.Checked;
+                SaveQuietly();
+                showState();
+                SetStatus(app.OpenInTv ? name + " will open in TV mode." : name + " won't open in TV mode. It stays in the list - switch it back on any time.", false);
+            };
 
             var close = Place(row, new Toggle { Font = Sc.Font(12.5f), ForeColor = Theme.Fg, Surface = Theme.Inset },
                 rw - 12 - buttonsW - 8 - toggleW, 7, toggleW, 26);
@@ -260,6 +286,27 @@ namespace TVMode
                 rw - 12 - btnW, 5, btnW, 30);
             remove.Click += delegate { BeginInvoke((MethodInvoker)delegate { RemoveApp(app); }); };
             new ToolTip().SetToolTip(remove, "Remove from the list");
+        }
+
+        /// <summary>Grey, see-through copy of an icon, for apps that are switched off.</summary>
+        static Image Faded(Image source)
+        {
+            var bmp = new Bitmap(source.Width, source.Height, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            var m = new System.Drawing.Imaging.ColorMatrix(new[]
+            {
+                new[] { 0.30f, 0.30f, 0.30f, 0, 0 },
+                new[] { 0.59f, 0.59f, 0.59f, 0, 0 },
+                new[] { 0.11f, 0.11f, 0.11f, 0, 0 },
+                new[] { 0f, 0, 0, 0.45f, 0 },
+                new[] { 0f, 0, 0, 0, 1 }
+            });
+            using (var g = Graphics.FromImage(bmp))
+            using (var attrs = new System.Drawing.Imaging.ImageAttributes())
+            {
+                attrs.SetColorMatrix(m);
+                g.DrawImage(source, new Rectangle(0, 0, bmp.Width, bmp.Height), 0, 0, source.Width, source.Height, GraphicsUnit.Pixel, attrs);
+            }
+            return bmp;
         }
 
         static string HintFor(TvApp app, bool canClose)
@@ -384,6 +431,12 @@ namespace TVMode
                 SetStatus("The hotkey " + Settings.HotkeyText + " is already used by another app. Pick another one in Settings.", true);
         }
 
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            if (Settings.SetupPending) BeginInvoke((MethodInvoker)OpenSetup);
+        }
+
         protected override void WndProc(ref Message m)
         {
             if (m.Msg == Native.WM_HOTKEY && m.WParam.ToInt32() == HOTKEY_TOGGLE)
@@ -482,10 +535,47 @@ namespace TVMode
             settingsDialog.Show(this);
         }
 
+        public void OpenSetup()
+        {
+            if (setupOpen) return;
+            if ((appWorker != null && appWorker.IsAlive) || !SetupSession.TryEnter())
+            {
+                SetStatus("Wait for the current mode switch to finish before opening setup.", true);
+                return;
+            }
+            setupOpen = true;
+            try
+            {
+                using (var wizard = new SetupWizard(UiNative.DpiOf(Handle)))
+                {
+                    wizard.ShowDialog(this);
+                    if (Settings.SetupPending)
+                    {
+                        Settings.SetupPending = false;
+                        SaveQuietly();
+                    }
+                    RefreshAll();
+                    if (!string.IsNullOrEmpty(wizard.ResultMessage))
+                        SetStatus(wizard.ResultMessage, wizard.ResultError);
+                }
+            }
+            finally
+            {
+                setupOpen = false;
+                SetupSession.Exit();
+            }
+        }
+
         // ---------------- switching
 
         void DoSwitch(Mode mode, bool launchApps = true)
         {
+            if (setupOpen) return;
+            if (!SetupSession.TryEnter())
+            {
+                SetStatus("Another mode switch is in progress.", true);
+                return;
+            }
             string title = Modes.Name(mode) + " MODE";
             try
             {
@@ -500,7 +590,8 @@ namespace TVMode
 
                 var p = Settings.For(mode);
                 bool audio = !string.IsNullOrEmpty(p.AudioId);
-                bool openApps = mode == Mode.TV && launchApps && Settings.TvApps.Count > 0;
+                var appsToOpen = Settings.TvApps.Where(a => a.OpenInTv).ToList();
+                bool openApps = mode == Mode.TV && launchApps && appsToOpen.Count > 0;
                 bool closeApps = mode == Mode.PC && Settings.TvApps.Any(a => a.CloseOnPc);
 
                 // Screens go blank for a moment during the switch; show the message once they're back.
@@ -513,7 +604,7 @@ namespace TVMode
                 }
                 if (openApps)
                 {
-                    SetOsdLine(1, "Opening " + (Settings.TvApps.Count == 1 ? AppLauncher.NameOf(Settings.TvApps[0]) : Settings.TvApps.Count + " apps") + "...", false);
+                    SetOsdLine(1, "Opening " + (appsToOpen.Count == 1 ? AppLauncher.NameOf(appsToOpen[0]) : appsToOpen.Count + " apps") + "...", false);
                     RunAppsInBackground(true);
                 }
                 else if (closeApps) RunAppsInBackground(false);
@@ -523,6 +614,7 @@ namespace TVMode
                 SetStatus(ex.Message, true);
                 Osd.ShowMessage(Mode.Unknown, "Couldn't switch", ex.Message, true);
             }
+            finally { SetupSession.Exit(); }
             RefreshAll();
             refreshTimer.Stop();
             refreshTimer.Start();
@@ -608,7 +700,7 @@ namespace TVMode
             int version = switchVersion;
             var apps = Settings.TvApps.Select(a => new TvApp
             {
-                Name = a.Name, Path = a.Path, Args = a.Args, CloseOnPc = a.CloseOnPc,
+                Name = a.Name, Path = a.Path, Args = a.Args, CloseOnPc = a.CloseOnPc, OpenInTv = a.OpenInTv,
                 WaitForPrimary = a.WaitForPrimary, WaitForAudio = a.WaitForAudio
             }).ToList();
             var tvKeys = Settings.Tv.Keys;
@@ -937,6 +1029,12 @@ namespace TVMode
             AddLabel(this, "Highest rate on the charger, " + DisplayManager.BatteryRefreshHz + "Hz on battery, like G-Helper. Applied after every switch.",
                 74, 244, w - 98, 36, Sc.Font(12), Theme.Muted);
 
+            var setup = Place(this, new FlatButton { Text = "Setup wizard", Font = Sc.Font(13) }, 24, 296, 130, 34);
+            setup.Click += delegate
+            {
+                Close();
+                main.BeginInvoke((MethodInvoker)main.OpenSetup);
+            };
             var done = Place(this, new FlatButton { Style = FlatButton.Kind.Primary, Text = "Done", Font = Sc.Font(13, true) }, w - 24 - 100, 296, 100, 34);
             done.Click += delegate { Close(); };
             ActiveControl = done;
