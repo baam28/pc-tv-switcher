@@ -4,9 +4,9 @@ Switch your Windows displays and sound between your desk and your TV with one ho
 
 [Download TVMode.exe from GitHub Releases](https://github.com/baam28/pc-tv-switcher/releases/latest)
 
-Run `TVMode.exe` on the Windows PC connected to your displays. Keep it in a permanent folder if you plan to use desktop shortcuts or start it with Windows.
+Run `TVMode.exe` on the Windows PC connected to your displays. It needs Windows 10 or 11 and nothing else to install. Keep it in a permanent folder if you plan to use desktop shortcuts or start it with Windows.
 
-> The setup wizard, desktop shortcut creation, and `tv-no-apps` command are available in the current source build. If you use the v1.0.1 release, follow [manual setup](#manual-setup). Its tray menu already includes **TV mode without apps**.
+**Upgrading from v1.0.x?** Exit the running copy from the tray, then replace `TVMode.exe` in the same folder. Your profiles, apps and settings carry over. To try the new setup wizard, open **Settings → Setup wizard**.
 
 ## Set up your PC and TV profiles
 
@@ -43,9 +43,9 @@ Closing the window or pressing **Esc** keeps the app available in the tray. Righ
 ## Launch apps in TV mode
 
 1. Under **Apps for TV mode**, select **Add app**. Choose an installed preset such as **Steam Big Picture**, or select **Choose another app…** to search the Start menu or browse for an executable.
-2. Each app has two switches. The line under its name sums them up, for example *Opens in TV · closes in PC*.
+2. Each app has two switches. The line under its name sums them up, for example *Opens in TV mode · closes in PC mode*.
    - **Open in TV mode**: turn it off to keep the app in the list without opening it.
-   - **Close in PC mode**: decides what happens when you switch back. For supported desktop apps, PC–TV Switcher asks only the instances it started to close. This gives apps a chance to prompt you to save. Store apps and web links can't be closed automatically, so that switch is greyed out for them.
+   - **Close in PC mode**: decides what happens when you switch back. For supported desktop apps, PC–TV Switcher asks only the instances it started to close. This gives apps a chance to prompt you to save. Store apps and web links can't be closed automatically, so for them this switch shows a dashed outline and can't be turned on.
 3. Use the pencil button to open **Start options**. Supported desktop apps can take arguments such as `--fullscreen`. Any listed app can wait for a TV-profile screen to become the main display, for the configured TV sound output to become the Windows default, or for both. If a selected check is still pending after 12 seconds, the app is skipped and the switch status explains why. The audio check is inactive when TV sound is set to **Don't change**.
 
 With **Close in PC mode** enabled for Steam Big Picture, returning to PC mode exits Big Picture. If PC–TV Switcher started Steam, it asks Steam to shut down as well.
@@ -84,6 +84,6 @@ From the repository root on Windows, run:
 powershell -ExecutionPolicy Bypass -File build.ps1
 ```
 
-The script uses the Windows .NET Framework C# compiler and writes `TVMode.exe` to the repository root. If a running copy is using that executable, exit it from the tray before rebuilding.
+The script uses the Windows .NET Framework C# compiler and writes `TVMode.exe` to the repository root. If a running copy is using that executable, exit it from the tray before rebuilding. The built `TVMode.exe` isn't committed; released builds are attached to [GitHub Releases](https://github.com/baam28/pc-tv-switcher/releases). The version number is set in `src/AssemblyInfo.cs`.
 
-Settings are stored at `%APPDATA%\TVMode\settings.ini`. To upgrade, exit the running copy, then replace `TVMode.exe` in the same folder so your desktop shortcuts continue to point to it.
+Settings are stored at `%APPDATA%\TVMode\settings.ini`, and failed display switches are logged to `%APPDATA%\TVMode\switch.log`. To upgrade, exit the running copy, then replace `TVMode.exe` in the same folder so your desktop shortcuts continue to point to it.
