@@ -46,8 +46,12 @@ namespace TVMode
             public DarkCombo Audio;
         }
 
-        public MainForm(bool startHidden) : base(Native.PrimaryDpi())
+        /// <summary>A switch to run as soon as the app is up (it was started by a desktop shortcut), or null.</summary>
+        string startCommand;
+
+        public MainForm(bool startHidden, string startCommand = null) : base(Native.PrimaryDpi())
         {
+            this.startCommand = startCommand;
             allowShow = !startHidden;
             Text = Program.AppName;
             FormBorderStyle = FormBorderStyle.FixedSingle;
@@ -446,6 +450,26 @@ namespace TVMode
             base.OnHandleCreated(e);
             if (!RegisterToggleHotkey())
                 SetStatus("The hotkey " + Settings.HotkeyText + " is already used by another app. Pick another one in Settings.", true);
+            if (startCommand != null)
+            {
+                string cmd = startCommand;
+                startCommand = null;
+                BeginInvoke((MethodInvoker)delegate { RunCommand(cmd); });
+            }
+        }
+
+        /// <summary>Runs a switch asked for by a desktop shortcut, exactly as the hotkey or buttons would.</summary>
+        void RunCommand(string cmd)
+        {
+            if (cmd == null) return;
+            if (setupOpen) { SetStatus("Finish or close the setup wizard before switching modes.", true); return; }
+            Mode mode = cmd == "pc" ? Mode.PC : cmd == "toggle" ? Mode.Unknown : Mode.TV;
+            if (mode == Mode.Unknown)
+            {
+                mode = Mode.TV;
+                try { mode = Modes.Opposite(); } catch { }
+            }
+            DoSwitch(mode, cmd != "tv-no-apps");
         }
 
         protected override void OnShown(EventArgs e)
@@ -465,6 +489,12 @@ namespace TVMode
             else if (m.Msg == Program.ShowWindowMessage && Program.ShowWindowMessage != 0)
             {
                 ShowWindow();
+                return;
+            }
+            else if (m.Msg == Program.SwitchCommandMessage && Program.SwitchCommandMessage != 0)
+            {
+                string cmd = Program.CommandName(m.WParam.ToInt32());
+                BeginInvoke((MethodInvoker)delegate { RunCommand(cmd); });
                 return;
             }
             base.WndProc(ref m);

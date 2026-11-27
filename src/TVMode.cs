@@ -261,6 +261,9 @@ namespace TVMode
         public static extern bool SetForegroundWindow(IntPtr hWnd);
 
         [DllImport("user32.dll")]
+        public static extern bool AllowSetForegroundWindow(int processId);
+
+        [DllImport("user32.dll")]
         public static extern bool PostMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 
         [DllImport("dwmapi.dll")]
@@ -1823,6 +1826,16 @@ namespace TVMode
         /// <summary>Sent by a second launch so the running copy brings its window to the front.</summary>
         public static readonly int ShowWindowMessage = Native.RegisterWindowMessage("TVMode_ShowWindow_7b3f");
 
+        /// <summary>Sent by a desktop shortcut so the running copy does the switch (wParam = <see cref="CommandCode"/>).</summary>
+        public static readonly int SwitchCommandMessage = Native.RegisterWindowMessage("TVMode_SwitchCommand_7b3f");
+
+        static readonly string[] switchCommands = { "", "pc", "tv", "tv-no-apps", "toggle" };
+
+        /// <summary>1-4 for a switch command, 0 for anything else.</summary>
+        public static int CommandCode(string cmd) { int i = Array.IndexOf(switchCommands, cmd); return i < 0 ? 0 : i; }
+
+        public static string CommandName(int code) { return code > 0 && code < switchCommands.Length ? switchCommands[code] : null; }
+
         [STAThread]
         static int Main(string[] args)
         {
@@ -1830,9 +1843,14 @@ namespace TVMode
             string cmd = args.Length > 0 ? args[0].Trim().TrimStart('-', '/').ToLowerInvariant() : "";
 
             // Command-line use: TVMode.exe pc | tv | tv-no-apps | toggle | list
-            if (cmd == "pc" || cmd == "tv" || cmd == "tv-no-apps" || cmd == "toggle" || cmd == "list")
+            bool isSwitch = CommandCode(cmd) != 0;
+            bool hasConsole = (isSwitch || cmd == "list") && Native.AttachConsole(-1);
+
+            // From a terminal or script: switch right here and print what happened.
+            // From a desktop shortcut or Explorer (no console) it falls through to the app below instead, so the switch
+            // looks and behaves exactly like the hotkey: on-screen message, "Keep this setup?", apps, tray status.
+            if (cmd == "list" || (isSwitch && hasConsole))
             {
-                bool hasConsole = Native.AttachConsole(-1);
                 try
                 {
                     if (cmd == "list")
@@ -1878,13 +1896,21 @@ namespace TVMode
             {
                 if (!createdNew)
                 {
-                    // Already running (maybe hidden in the tray): ask that copy to show its window.
-                    if (cmd != "tray") Native.PostMessage((IntPtr)0xFFFF /* HWND_BROADCAST */, ShowWindowMessage, IntPtr.Zero, IntPtr.Zero);
+                    if (isSwitch)
+                    {
+                        // Hand the switch to the copy already running (usually in the tray). This process was started
+                        // by a click, so it may bring windows to the front: pass that on, so "Keep this setup?" gets focus.
+                        Native.AllowSetForegroundWindow(-1 /* ASFW_ANY */);
+                        Native.PostMessage((IntPtr)0xFFFF /* HWND_BROADCAST */, SwitchCommandMessage, (IntPtr)CommandCode(cmd), IntPtr.Zero);
+                    }
+                    // Otherwise: ask that copy to show its window.
+                    else if (cmd != "tray") Native.PostMessage((IntPtr)0xFFFF /* HWND_BROADCAST */, ShowWindowMessage, IntPtr.Zero, IntPtr.Zero);
                     return 0;
                 }
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
-                Application.Run(new MainForm(cmd == "tray"));
+                // Not running yet: a shortcut starts the app in the tray and switches straight away.
+                Application.Run(new MainForm(cmd == "tray" || isSwitch, isSwitch ? cmd : null));
             }
             return 0;
         }

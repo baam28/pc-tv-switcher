@@ -34,7 +34,9 @@ Connect your displays and turn on the TV. On a fresh setup, the wizard opens whe
 
 **TV mode without apps** still applies the TV display and sound profile. It leaves running apps alone. When you return to PC mode, the usual per-app close settings apply.
 
-After you switch to TV mode, the TV shows **Keep this setup?** with a 15-second countdown. Select **Keep** or press **Enter** to stay in TV mode; your TV apps open at that point. Select **Go back**, press **Esc**, or let the countdown run out, and your previous screens and sound output come back. That way a TV that's off or on the wrong input can't leave you with a black screen. Pressing the hotkey again while the question is showing also counts as keeping it. Turn the question off under **Settings → Ask to keep TV mode**. Switches from the command line and desktop shortcuts don't ask.
+After you switch to TV mode, the TV shows **Keep this setup?** with a 15-second countdown. Select **Keep** or press **Enter** to stay in TV mode; your TV apps open at that point. Select **Go back**, press **Esc**, or let the countdown run out, and your previous screens and sound output come back. That way a TV that's off or on the wrong input can't leave you with a black screen. Pressing the hotkey again while the question is showing also counts as keeping it. Turn the question off under **Settings → Ask to keep TV mode**. Desktop shortcuts ask too; commands typed in a terminal don't.
+
+Desktop shortcuts switch the same way the hotkey does: the running copy in the tray does the switch and shows the on-screen message. If PC–TV Switcher isn't running, the shortcut starts it in the tray and then switches.
 
 Closing the window or pressing **Esc** keeps the app available in the tray. Right-click the tray icon and select **Exit** to quit. Enable **Start with Windows** in Settings to keep the hotkey available after signing in.
 
@@ -72,7 +74,7 @@ Run these commands from the folder containing `TVMode.exe`. In PowerShell, inclu
 .\TVMode.exe list
 ```
 
-`list` shows displays, sound outputs, profiles, and configured TV apps. The switch commands use the same profiles and app settings as the window and tray menu.
+`list` shows displays, sound outputs, profiles, and configured TV apps. The switch commands use the same profiles and app settings as the window and tray menu. Run from a terminal, they switch directly, print the result and exit, without the on-screen message or **Keep this setup?**. Run without a terminal, for example from a shortcut or a launcher app, they're handed to the app in the tray like a desktop shortcut.
 
 ## Build from source
 
