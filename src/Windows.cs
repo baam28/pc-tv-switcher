@@ -191,7 +191,7 @@ namespace TVMode
         {
             var apps = Settings.TvApps;
             float headH = apps.Count > 0 ? 70 : 48;
-            const float footH = 34;
+            const float footH = 10; // bottom padding
             var workArea = (IsHandleCreated ? Screen.FromHandle(Handle) : Screen.PrimaryScreen).WorkingArea;
             float room = (workArea.Height - (Height - ClientSize.Height)) / Sc.F - y - headH - footH - 46;
             int visible = Math.Max(1, Math.Min(Math.Min(apps.Count, MaxVisibleApps), (int)(room / AppRowH)));
@@ -226,9 +226,6 @@ namespace TVMode
                 AddLabel(card, "OPEN IN TV MODE", offset + SwitchColX(rw, 0), 50, SwitchColW, 16, headFont, Theme.Muted, ContentAlignment.TopCenter);
                 AddLabel(card, "CLOSE IN PC MODE", offset + SwitchColX(rw, 1), 50, SwitchColW, 16, headFont, Theme.Muted, ContentAlignment.TopCenter);
             }
-
-            AddLabel(card, "Apps open a moment after switching to TV mode. TV mode only ever closes copies it opened itself.",
-                16, headH + visible * AppRowH + 8, iw, 20, Sc.Font(12), Theme.Muted);
             return cardH;
         }
 
