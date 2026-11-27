@@ -829,7 +829,7 @@ namespace TVMode
             }
 
             if (doneTargets.Count != wantedKeys.Count)
-                throw new Exception("Could not find a free graphics output for every display.");
+                throw new Exception("Couldn't find a free graphics output for every display.");
 
             var arr = chosen.ToArray();
             uint saveFlag = save ? Native.SDC_SAVE_TO_DATABASE : 0;

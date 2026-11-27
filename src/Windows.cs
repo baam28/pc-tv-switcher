@@ -177,7 +177,7 @@ namespace TVMode
         const float AppRowH = 48;
 
         // Two switch columns on every app row, under headings at the top of the list.
-        const float SwitchColW = 116, RowButtonW = 30;
+        const float SwitchColW = 106, RowButtonW = 30;
 
         /// <summary>X (in row coordinates) where a switch column starts: 0 = "Open in TV mode", 1 = "Close in PC mode".</summary>
         static float SwitchColX(float rowWidth, int column)
@@ -329,9 +329,9 @@ namespace TVMode
         {
             // Kept short so it fits beside the switches; the column headings carry the rest.
             if (!app.OpenInTv) return "Won't open in TV mode";
-            if (!canClose) return "Opens in TV · close it yourself";
-            if (!app.CloseOnPc) return "Opens in TV · stays open in PC";
-            return "Opens in TV · closes in PC";
+            if (!canClose) return "Opens in TV mode · you close it";
+            if (!app.CloseOnPc) return "Opens in TV mode · stays open";
+            return "Opens in TV mode · closes in PC mode";
         }
 
         void ShowAddMenu(Control anchor)
@@ -835,7 +835,7 @@ namespace TVMode
             else if (results.Count == 1)
                 line = r.Message;
             else
-                line = (open ? "TV apps processed: " : "Apps closed: ") + results.Count;
+                line = (open ? "Opened " : "Closed ") + results.Count + " apps";
             if (!SetOsdLine(1, line, errors.Count > 0) && r.Error)
                 Osd.ShowMessage(Mode.Unknown, open ? "App not opened" : "App still open", r.Message, true);
         }
@@ -858,7 +858,7 @@ namespace TVMode
         void SaveQuietly()
         {
             try { Settings.Save(); }
-            catch (Exception ex) { SetStatus("Could not save settings: " + ex.Message, true); }
+            catch (Exception ex) { SetStatus("Couldn't save settings: " + ex.Message, true); }
         }
 
         // ---------------- profile editing
@@ -1000,7 +1000,7 @@ namespace TVMode
             if (pcUi == null) return;
             List<AudioDevice> outputs;
             try { outputs = AudioManager.GetOutputs(); }
-            catch (Exception ex) { SetStatus("Could not read sound devices: " + ex.Message, true); return; }
+            catch (Exception ex) { SetStatus("Couldn't read sound devices: " + ex.Message, true); return; }
             if (pcUi.Audio.DroppedDown || tvUi.Audio.DroppedDown) return;
             bool wasLoading = loading;
             loading = true;
@@ -1153,7 +1153,7 @@ namespace TVMode
             startup.CheckedChanged += delegate
             {
                 try { Settings.StartWithWindows = startup.Checked; }
-                catch (Exception ex) { SetHint("Could not change startup setting: " + ex.Message, true); }
+                catch (Exception ex) { SetHint("Couldn't change startup setting: " + ex.Message, true); }
             };
             AddLabel(this, "Runs quietly in the tray, so the hotkey always works.", 74, 186, w - 98, 20, Sc.Font(12), Theme.Muted);
 
@@ -1162,7 +1162,7 @@ namespace TVMode
             refresh.CheckedChanged += delegate
             {
                 Settings.LaptopRefreshFollowsPower = refresh.Checked;
-                try { Settings.Save(); } catch (Exception ex) { SetHint("Could not save settings: " + ex.Message, true); return; }
+                try { Settings.Save(); } catch (Exception ex) { SetHint("Couldn't save settings: " + ex.Message, true); return; }
                 if (!refresh.Checked) return;
                 try
                 {
@@ -1179,7 +1179,7 @@ namespace TVMode
             confirm.CheckedChanged += delegate
             {
                 Settings.ConfirmTvSwitch = confirm.Checked;
-                try { Settings.Save(); } catch (Exception ex) { SetHint("Could not save settings: " + ex.Message, true); }
+                try { Settings.Save(); } catch (Exception ex) { SetHint("Couldn't save settings: " + ex.Message, true); }
             };
             AddLabel(this, "After switching to TV mode, press Keep (or Enter). If you don't within 15 seconds - say the TV shows no picture - your previous screens come back.",
                 74, 318, w - 98, 52, Sc.Font(12), Theme.Muted);
@@ -1453,6 +1453,13 @@ namespace TVMode
                 frame.Controls.Add(box);
                 Native.SetPlaceholder(box, "For example, --fullscreen");
                 y += 76;
+            }
+            else
+            {
+                // Explain why there's no arguments box, rather than leaving it to look missing.
+                AddLabel(this, AppLauncher.IsSteam(app.Path) ? "Steam Big Picture doesn't take command-line arguments."
+                    : "Store apps and web links don't take command-line arguments.", 20, y, w - 40, 20, Sc.Font(12.5f), Theme.Muted);
+                y += 34;
             }
 
             primary = Place(this, new Toggle { Text = "Wait for a TV profile screen to become the main display",

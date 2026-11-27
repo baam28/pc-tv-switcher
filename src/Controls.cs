@@ -459,20 +459,31 @@ namespace TVMode
             float tw = 38 * f, th = 20 * f, ty = (Height - th) / 2f;
             var track = new RectangleF(1, ty, tw, th);
 
-            Color trackFill = isOn ? (hover ? Theme.AccentHover : Theme.Accent) : Surface;
-            Color trackBorder = isOn ? trackFill : (hover ? Theme.Fg : Theme.Muted);
-            if (!Enabled) { trackFill = isOn ? Theme.Faint : Surface; trackBorder = Theme.Faint; }
-            using (var path = Theme.RoundRect(track, th / 2))
-            using (var b = new SolidBrush(trackFill))
-            using (var p = new Pen(trackBorder, Math.Max(1, f)))
+            if (!Enabled)
             {
-                g.FillPath(b, path);
-                g.DrawPath(p, path);
+                // "Not available" must not look like "off": dashed outline, no knob, a dash in the middle.
+                using (var path = Theme.RoundRect(track, th / 2))
+                using (var p = new Pen(Theme.Faint, Math.Max(1, f)) { DashStyle = DashStyle.Dash })
+                    g.DrawPath(p, path);
+                using (var p = new Pen(Theme.Faint, Math.Max(1.5f, 2 * f)) { StartCap = LineCap.Round, EndCap = LineCap.Round })
+                    g.DrawLine(p, track.X + tw * 0.36f, ty + th / 2, track.Right - tw * 0.36f, ty + th / 2);
             }
-            float knob = isOn ? 12 * f : 10 * f;
-            float kx = isOn ? track.Right - 4 * f - knob : track.X + 5 * f;
-            using (var b = new SolidBrush(isOn ? Color.White : (Enabled ? (hover ? Theme.Fg : Theme.Muted) : Theme.Faint)))
-                g.FillEllipse(b, kx, ty + (th - knob) / 2f, knob, knob);
+            else
+            {
+                Color trackFill = isOn ? (hover ? Theme.AccentHover : Theme.Accent) : Surface;
+                Color trackBorder = isOn ? trackFill : (hover ? Theme.Fg : Theme.Muted);
+                using (var path = Theme.RoundRect(track, th / 2))
+                using (var b = new SolidBrush(trackFill))
+                using (var p = new Pen(trackBorder, Math.Max(1, f)))
+                {
+                    g.FillPath(b, path);
+                    g.DrawPath(p, path);
+                }
+                float knob = isOn ? 12 * f : 10 * f;
+                float kx = isOn ? track.Right - 4 * f - knob : track.X + 5 * f;
+                using (var b = new SolidBrush(isOn ? Color.White : (hover ? Theme.Fg : Theme.Muted)))
+                    g.FillEllipse(b, kx, ty + (th - knob) / 2f, knob, knob);
+            }
 
             if (Focused && ShowFocusCues)
                 using (var fp = new Pen(Theme.AccentHover, Math.Max(1, f)) { DashStyle = DashStyle.Dot })

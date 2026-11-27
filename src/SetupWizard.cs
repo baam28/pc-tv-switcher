@@ -164,7 +164,7 @@ namespace TVMode
                 SetNotice(null, false);
                 BuildUi();
             }
-            catch (Exception ex) { SetNotice("Could not capture the PC setup. " + ex.Message, true); }
+            catch (Exception ex) { SetNotice("Couldn't capture the PC setup. " + ex.Message, true); }
         }
 
         List<ScreenRef> ScreensFor(SavedLayout layout)
@@ -252,7 +252,7 @@ namespace TVMode
             }
             catch (Exception ex)
             {
-                ReturnToScreenSelection("Could not test the TV setup. " + ex.Message, true);
+                ReturnToScreenSelection("Couldn't test the TV setup. " + ex.Message, true);
             }
         }
 
@@ -281,7 +281,7 @@ namespace TVMode
         void RefreshAudio()
         {
             try { outputs = AudioManager.GetOutputs().Where(d => d.Active).ToList(); }
-            catch (Exception ex) { SetNotice("Could not list sound outputs. " + ex.Message, true); }
+            catch (Exception ex) { SetNotice("Couldn't list sound outputs. " + ex.Message, true); }
             if (!outputs.Any(d => d.Id == tvAudio)) tvAudio = "";
             BuildUi();
         }
@@ -335,7 +335,7 @@ namespace TVMode
             }
             catch (Exception ex)
             {
-                warning = "Could not restore the previous screens. Reconnect them and try again. " + ex.Message;
+                warning = "Couldn't restore the previous screens. Reconnect them and try again. " + ex.Message;
                 return false;
             }
             previousLayout = null;
@@ -345,9 +345,9 @@ namespace TVMode
                 {
                     string error;
                     if (AudioManager.GetDefaultId() != previousAudio && !AudioManager.SetDefault(previousAudio, 3000, out error))
-                        warning = "Could not restore the previous sound output. " + error;
+                        warning = "Couldn't restore the previous sound output. " + error;
                 }
-                catch (Exception ex) { warning = "Could not restore the previous sound output. " + ex.Message; }
+                catch (Exception ex) { warning = "Couldn't restore the previous sound output. " + ex.Message; }
             }
             return true;
         }
@@ -384,7 +384,7 @@ namespace TVMode
                 Settings.Pc = oldPc;
                 Settings.Tv = oldTv;
                 Settings.SetupPending = oldPending;
-                SetNotice("Could not save the profiles. " + ex.Message, true);
+                SetNotice("Couldn't save the profiles. " + ex.Message, true);
                 return;
             }
             ResultMessage = "PC and TV profiles saved.";
@@ -395,7 +395,7 @@ namespace TVMode
                     DesktopShortcuts.Create(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), Application.ExecutablePath);
                     ResultMessage += " Desktop shortcuts created.";
                 }
-                catch (Exception ex) { ResultError = true; ResultMessage += " Could not create desktop shortcuts. " + ex.Message; }
+                catch (Exception ex) { ResultError = true; ResultMessage += " Couldn't create desktop shortcuts. " + ex.Message; }
             }
             if (restoreWarning != null) { ResultError = true; ResultMessage += " " + restoreWarning; }
             DialogResult = DialogResult.OK;
@@ -430,7 +430,7 @@ namespace TVMode
 
     static class DesktopShortcuts
     {
-        static readonly string[] names = { "PC-TV Switcher - PC mode", "PC-TV Switcher - TV mode", "PC-TV Switcher - TV without apps" };
+        static readonly string[] names = { "PC-TV Switcher - PC mode", "PC-TV Switcher - TV mode", "PC-TV Switcher - TV mode without apps" };
         static readonly string[] arguments = { "pc", "tv", "tv-no-apps" };
 
         public static void Create(string desktop, string exe)

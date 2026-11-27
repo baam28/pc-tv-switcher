@@ -16,7 +16,7 @@ Connect your displays and turn on the TV. On a fresh setup, the wizard opens whe
 2. Select the displays you want in TV mode. **Identify** shows matching numbers on screens that are already on. Use **Refresh** after connecting a display.
 3. Choose **Test TV setup**. If you can see the wizard after the switch, select **I can see this** within 15 seconds. If the screen stays blank, wait for the previous display setup to return.
 4. Choose your TV sound output. Use **Refresh** if the HDMI output takes a moment to appear. Select **Test sound output** and play something to check it.
-5. Optionally enable **Create three desktop shortcuts** for **PC mode**, **TV mode**, and **TV without apps**. Choose **Finish and save** to save both profiles and return to your previous setup.
+5. Optionally enable **Create three desktop shortcuts** for **PC mode**, **TV mode**, and **TV mode without apps**. Choose **Finish and save** to save both profiles and return to your previous setup.
 
 ### Manual setup
 
@@ -30,7 +30,7 @@ Connect your displays and turn on the TV. On a fresh setup, the wizard opens whe
 | --- | --- |
 | Toggle between PC and TV | Press **Ctrl+Alt+T**. Change the shortcut under **Settings → Switch hotkey**. |
 | Pick a mode directly | Click **PC mode** or **TV mode** in the main window or tray menu. You can also use the matching desktop shortcut if you created it. |
-| Switch to the TV without launching apps | Choose **TV mode without apps** in the tray menu or use the **TV without apps** desktop shortcut. |
+| Switch to the TV without launching apps | Choose **TV mode without apps** in the tray menu or use the **TV mode without apps** desktop shortcut. |
 
 **TV mode without apps** still applies the TV display and sound profile. It leaves running apps alone. When you return to PC mode, the usual per-app close settings apply.
 
