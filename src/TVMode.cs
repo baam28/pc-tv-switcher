@@ -707,33 +707,112 @@ namespace TVMode
         }
 
         /// <summary>Turns on exactly the connected displays matching <paramref name="wanted"/> (extended desktop) and turns off the rest.</summary>
+        // Win32 error codes SetDisplayConfig returns.
+        const int ERROR_ACCESS_DENIED = 5, ERROR_GEN_FAILURE = 31, ERROR_NOT_SUPPORTED = 50,
+                  ERROR_INVALID_PARAMETER = 87, ERROR_BAD_CONFIGURATION = 1610;
+
+        // Valid values for paths we turn on (inactive paths from QueryDisplayConfig carry 0, which Windows rejects).
+        const uint ROTATION_IDENTITY = 1, SCALING_PREFERRED = 128;
+
+        /// <summary>Thrown when Windows won't make the change; the message explains it in plain words.</summary>
+        public class SwitchRefusedException : Exception
+        {
+            public readonly int ErrorCode;
+            public SwitchRefusedException(int code) : base(Explain(code)) { ErrorCode = code; }
+        }
+
+        public static string Explain(int code)
+        {
+            string why;
+            switch (code)
+            {
+                case ERROR_ACCESS_DENIED:
+                    why = "Windows blocked the display change. This happens while the screen is locked, a UAC (admin) prompt is open, or in a Remote Desktop session.";
+                    break;
+                case ERROR_GEN_FAILURE:
+                    why = "The graphics driver couldn't switch screens right now - often because the TV is still waking up. Try again in a few seconds.";
+                    break;
+                case ERROR_INVALID_PARAMETER:
+                case ERROR_BAD_CONFIGURATION:
+                    why = "Windows couldn't find a working setup for these screens. Check the TV is on the right input, then switch again or save the profile's layout again.";
+                    break;
+                case ERROR_NOT_SUPPORTED:
+                    why = "The graphics driver doesn't support this screen combination.";
+                    break;
+                default:
+                    why = "Windows refused the display change.";
+                    break;
+            }
+            return why + " (error " + code + ")";
+        }
+
+        /// <summary>
+        /// Turns on exactly the connected displays matching <paramref name="wanted"/> (extended desktop) and turns off the rest.
+        /// Tries a few ways and, if Windows is busy (TV waking up, driver reconfiguring), tries again shortly after.
+        /// </summary>
         public static void Apply(Func<DisplayTarget, bool> wanted, bool save = true)
+        {
+            int[] delaysMs = { 0, 500, 1200, 2500 };
+            int err = 0;
+            for (int attempt = 0; attempt < delaysMs.Length; attempt++)
+            {
+                if (delaysMs[attempt] > 0) Thread.Sleep(delaysMs[attempt]);
+                err = TryApply(wanted, save, attempt + 1); // re-reads the hardware every time
+                if (err == Native.ERROR_SUCCESS)
+                {
+                    if (attempt > 0) SwitchLog.Write("Switch succeeded on attempt " + (attempt + 1) + ".");
+                    return;
+                }
+            }
+            SwitchLog.Write("Switch FAILED: " + Explain(err));
+            throw new SwitchRefusedException(err);
+        }
+
+        /// <summary>One attempt: picks a path per wanted screen and tries each way of applying it. Returns the last error.</summary>
+        static int TryApply(Func<DisplayTarget, bool> wanted, bool save, int attempt)
         {
             Native.DISPLAYCONFIG_PATH_INFO[] all;
             Native.DISPLAYCONFIG_MODE_INFO[] modes;
             Query(Native.QDC_ALL_PATHS, out all, out modes);
 
             var targets = BuildTargets(all);
-            var wantedKeys = new HashSet<string>(targets.Where(wanted).Select(t => t.HwKey));
+            var wantedTargets = targets.Where(wanted).ToList();
+            var wantedKeys = new HashSet<string>(wantedTargets.Select(t => t.HwKey));
             if (wantedKeys.Count == 0) throw new Exception("None of the requested displays are connected.");
 
             var chosen = new List<Native.DISPLAYCONFIG_PATH_INFO>();
+            var keptModes = new List<Native.DISPLAYCONFIG_MODE_INFO>();
+            var chosenModes = new List<Native.DISPLAYCONFIG_PATH_INFO>(); // same paths, pointing at keptModes
             var usedSources = new HashSet<string>();
             var doneTargets = new HashSet<string>();
 
             // Pass 1: keep the source already driving a target that stays on (less flicker, keeps its settings).
-            // Pass 2: give each remaining target its own free source so the desktop is extended, not cloned.
-            for (int pass = 0; pass < 2; pass++)
+            // Pass 2: give each remaining target its own free source on the SAME graphics chip as its port
+            //         (cross-chip paths on two-GPU laptops are often refused), so the desktop is extended, not cloned.
+            // Pass 3: any free source, as a last resort.
+            for (int pass = 0; pass < 3; pass++)
             {
                 foreach (var p in all)
                 {
                     if (pass == 0 && !IsActive(p)) continue;
+                    if (pass == 1 && p.sourceInfo.adapterId.ToString() != p.targetInfo.adapterId.ToString()) continue;
                     if (p.targetInfo.targetAvailable == 0) continue;
                     string tk = TargetKey(p), sk = SourceKey(p);
                     if (!wantedKeys.Contains(tk) || doneTargets.Contains(tk) || usedSources.Contains(sk)) continue;
 
                     var np = p;
                     np.flags = Native.DISPLAYCONFIG_PATH_ACTIVE;
+                    np.sourceInfo.statusFlags = 0;   // output-only fields
+                    np.targetInfo.statusFlags = 0;
+                    if (np.targetInfo.rotation == 0) np.targetInfo.rotation = ROTATION_IDENTITY;
+                    if (np.targetInfo.scaling == 0) np.targetInfo.scaling = SCALING_PREFERRED;
+
+                    // A copy that keeps the screen's current resolution if it is already on (third method below).
+                    var withModes = np;
+                    withModes.sourceInfo.modeInfoIdx = KeepMode(p.sourceInfo.modeInfoIdx, modes, keptModes);
+                    withModes.targetInfo.modeInfoIdx = KeepMode(p.targetInfo.modeInfoIdx, modes, keptModes);
+                    chosenModes.Add(withModes);
+
                     np.sourceInfo.modeInfoIdx = Native.DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
                     np.targetInfo.modeInfoIdx = Native.DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
                     chosen.Add(np);
@@ -746,22 +825,49 @@ namespace TVMode
                 throw new Exception("Could not find a free graphics output for every display.");
 
             var arr = chosen.ToArray();
+            uint saveFlag = save ? Native.SDC_SAVE_TO_DATABASE : 0;
+            string screens = string.Join(", ", wantedTargets.Select(t => t.DisplayName));
+            var tries = new List<string>();
+            int err;
 
-            // Preferred: let Windows look up this monitor combination in its own database,
-            // so resolution, scaling, arrangement and primary display are restored the way you last set them.
-            int err = save ? Native.SetDisplayConfig((uint)arr.Length, arr, 0, null,
-                Native.SDC_APPLY | Native.SDC_TOPOLOGY_SUPPLIED | Native.SDC_ALLOW_PATH_ORDER_CHANGES) : -1;
-
-            if (err != Native.ERROR_SUCCESS)
+            // 1) Let Windows look up this screen combination in its own database, so resolution, scaling, arrangement
+            //    and main screen come back the way you last set them. (Skipped for a temporary switch: it would be saved.)
+            if (save)
             {
-                // Fallback for combinations Windows has never seen: let it pick modes itself.
                 err = Native.SetDisplayConfig((uint)arr.Length, arr, 0, null,
-                    Native.SDC_APPLY | Native.SDC_USE_SUPPLIED_DISPLAY_CONFIG | Native.SDC_ALLOW_CHANGES
-                    | (save ? Native.SDC_SAVE_TO_DATABASE : 0));
+                    Native.SDC_APPLY | Native.SDC_TOPOLOGY_SUPPLIED | Native.SDC_ALLOW_PATH_ORDER_CHANGES);
+                tries.Add("remembered=" + err);
+                if (err == Native.ERROR_SUCCESS) return Log(attempt, screens, tries, err);
             }
 
-            if (err != Native.ERROR_SUCCESS)
-                throw new Exception("Windows refused the display change (SetDisplayConfig error " + err + ").");
+            // 2) A combination Windows has never seen: let it pick resolutions itself.
+            err = Native.SetDisplayConfig((uint)arr.Length, arr, 0, null,
+                Native.SDC_APPLY | Native.SDC_USE_SUPPLIED_DISPLAY_CONFIG | Native.SDC_ALLOW_CHANGES | saveFlag);
+            tries.Add("auto=" + err);
+            if (err == Native.ERROR_SUCCESS) return Log(attempt, screens, tries, err);
+
+            // 3) Keep the current resolution of screens that are already on, let Windows fill in the rest.
+            var withCurrent = chosenModes.ToArray();
+            err = Native.SetDisplayConfig((uint)withCurrent.Length, withCurrent, (uint)keptModes.Count, keptModes.ToArray(),
+                Native.SDC_APPLY | Native.SDC_USE_SUPPLIED_DISPLAY_CONFIG | Native.SDC_ALLOW_CHANGES | saveFlag);
+            tries.Add("keep-current=" + err);
+            return Log(attempt, screens, tries, err);
+        }
+
+        /// <summary>Copies a mode the screen uses now into <paramref name="kept"/>; returns its new index, or "invalid".</summary>
+        static uint KeepMode(uint index, Native.DISPLAYCONFIG_MODE_INFO[] modes, List<Native.DISPLAYCONFIG_MODE_INFO> kept)
+        {
+            if (index == Native.DISPLAYCONFIG_PATH_MODE_IDX_INVALID || index >= modes.Length) return Native.DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
+            kept.Add(modes[index]);
+            return (uint)(kept.Count - 1);
+        }
+
+        static int Log(int attempt, string screens, List<string> tries, int err)
+        {
+            // Only failures (and the attempt that fixed them) are worth keeping.
+            if (err != Native.ERROR_SUCCESS || attempt > 1)
+                SwitchLog.Write("Attempt " + attempt + " for [" + screens + "]: " + string.Join(", ", tries));
+            return err;
         }
 
         public static Dictionary<string, string> ActiveScreenNames()
@@ -951,6 +1057,8 @@ namespace TVMode
             int err = Native.SetDisplayConfig((uint)paths.Length, paths, (uint)modes.Length, modes,
                 Native.SDC_APPLY | Native.SDC_USE_SUPPLIED_DISPLAY_CONFIG | Native.SDC_ALLOW_CHANGES
                 | (save ? Native.SDC_SAVE_TO_DATABASE : 0));
+            if (err != Native.ERROR_SUCCESS)
+                SwitchLog.Write("Saved layout [" + layout.Summary + "] refused with error " + err + "; falling back to a normal switch.");
             return err == Native.ERROR_SUCCESS;
         }
     }
@@ -1256,6 +1364,39 @@ namespace TVMode
         public static Mode Opposite()
         {
             return Current() == Mode.TV ? Mode.PC : Mode.TV;
+        }
+    }
+
+    // ------------------------------------------------------------------ Switch log
+    /// <summary>
+    /// Short record of display switches that Windows refused (and retries that fixed them), in
+    /// %APPDATA%\TVMode\switch.log, so a "sometimes it doesn't switch" problem can be traced afterwards.
+    /// </summary>
+    static class SwitchLog
+    {
+        static readonly object gate = new object();
+        const long MaxBytes = 128 * 1024;
+
+        public static string FilePath { get { return Path.Combine(Settings.Dir, "switch.log"); } }
+
+        public static void Write(string line)
+        {
+            try
+            {
+                lock (gate)
+                {
+                    Directory.CreateDirectory(Settings.Dir);
+                    var info = new FileInfo(FilePath);
+                    if (info.Exists && info.Length > MaxBytes)
+                    {
+                        // Keep the newer half.
+                        var lines = File.ReadAllLines(FilePath);
+                        File.WriteAllLines(FilePath, lines.Skip(lines.Length / 2));
+                    }
+                    File.AppendAllText(FilePath, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  " + line + Environment.NewLine);
+                }
+            }
+            catch { } // logging must never break a switch
         }
     }
 

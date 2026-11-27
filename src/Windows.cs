@@ -611,7 +611,8 @@ namespace TVMode
             }
             catch (Exception ex)
             {
-                SetStatus(ex.Message, true);
+                bool refused = ex is DisplayManager.SwitchRefusedException;
+                SetStatus(ex.Message + (refused ? " Details: " + SwitchLog.FilePath : ""), true);
                 Osd.ShowMessage(Mode.Unknown, "Couldn't switch", ex.Message, true);
             }
             finally { SetupSession.Exit(); }
@@ -1344,7 +1345,8 @@ namespace TVMode
         readonly Label lblDetail;
         readonly System.Windows.Forms.Timer timer;
         int elapsed;
-        const int HoldMs = 2200, TickMs = 30;
+        const int TickMs = 30;
+        int holdMs = 2200; // how long the message stays before fading (longer for errors)
 
         public static void ShowMessage(Mode mode, string title, string detail, bool error)
         {
@@ -1374,7 +1376,14 @@ namespace TVMode
             AutoScaleMode = AutoScaleMode.None;
             BackColor = Theme.Card;
             Opacity = 0.97;
-            Size = new Size(sc.S(380), sc.S(196));
+            // Errors carry a plain-language explanation: give them more room, size the box to the text,
+            // and keep them up longer so there's time to read.
+            var detailFont = sc.Font(14.5f);
+            int width = sc.S(error ? 470 : 380);
+            int textH = Math.Max(sc.S(60), TextRenderer.MeasureText(detail ?? "", detailFont, new Size(width - sc.S(40), 0),
+                TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl).Height + sc.S(6));
+            Size = new Size(width, sc.S(122) + textH + sc.S(16));
+            if (error) holdMs = 6000;
 
             var area = Native.PrimaryWorkArea();
             Location = new Point(area.Left + (area.Width - Width) / 2, area.Top + (area.Height - Height) / 2);
@@ -1396,8 +1405,8 @@ namespace TVMode
             });
             lblDetail = new Label
             {
-                Text = detail, Left = sc.S(20), Top = sc.S(122), Width = Width - sc.S(40), Height = sc.S(60), TextAlign = ContentAlignment.TopCenter,
-                Font = sc.Font(14.5f), ForeColor = error ? Theme.Danger : Theme.Muted, BackColor = Theme.Card, UseMnemonic = false
+                Text = detail, Left = sc.S(20), Top = sc.S(122), Width = Width - sc.S(40), Height = textH, TextAlign = ContentAlignment.TopCenter,
+                Font = detailFont, ForeColor = error ? Theme.Danger : Theme.Muted, BackColor = Theme.Card, UseMnemonic = false
             };
             Controls.Add(lblDetail);
 
@@ -1405,7 +1414,7 @@ namespace TVMode
             timer.Tick += delegate
             {
                 elapsed += TickMs;
-                if (elapsed < HoldMs) return;
+                if (elapsed < holdMs) return;
                 Opacity -= 0.07;
                 if (Opacity <= 0.05) { timer.Stop(); Close(); }
             };
