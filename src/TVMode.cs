@@ -258,6 +258,9 @@ namespace TVMode
         public static extern int RegisterWindowMessage(string name);
 
         [DllImport("user32.dll")]
+        public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
         public static extern bool PostMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 
         [DllImport("dwmapi.dll")]
@@ -527,12 +530,15 @@ namespace TVMode
         /// its picture is turned on, so this waits up to <paramref name="timeoutMs"/> for it.
         /// Blocks - call from a background thread in the UI.
         /// </summary>
-        public static bool SetDefault(string id, int timeoutMs, out string error)
+        /// <param name="cancelled">Checked while waiting; if it turns true (e.g. the switch was undone), gives up quietly:
+        /// returns false with <paramref name="error"/> left null.</param>
+        public static bool SetDefault(string id, int timeoutMs, out string error, Func<bool> cancelled = null)
         {
             error = null;
             DateTime deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
             while (!IsActive(id))
             {
+                if (cancelled != null && cancelled()) return false;
                 if (DateTime.UtcNow > deadline)
                 {
                     error = "The sound output for this mode isn't available.";
@@ -540,6 +546,7 @@ namespace TVMode
                 }
                 Thread.Sleep(500);
             }
+            if (cancelled != null && cancelled()) return false;
 
             var policy = (AudioNative.IPolicyConfig)new AudioNative.PolicyConfigClient();
             try
@@ -1102,6 +1109,7 @@ namespace TVMode
         public static uint HotkeyMods = Native.MOD_CONTROL | Native.MOD_ALT;
         public static uint HotkeyKey = (uint)Keys.T;
         public static bool LaptopRefreshFollowsPower = true;
+        public static bool ConfirmTvSwitch = true; // ask "Keep this setup?" after switching to TV mode; go back if unanswered
         public static List<TvApp> TvApps = new List<TvApp>(); // apps to open in TV mode, in order
         public static Mode LastMode = Mode.Unknown; // last mode switched to (tie-break when both profiles match)
         public static bool SetupPending;
@@ -1183,6 +1191,7 @@ namespace TVMode
                             case "HotkeyMods": if (uint.TryParse(v, out u)) HotkeyMods = u; break;
                             case "HotkeyKey": if (uint.TryParse(v, out u) && u != 0) HotkeyKey = u; break;
                             case "LaptopRefreshFollowsPower": LaptopRefreshFollowsPower = v.Trim() != "0"; break;
+                            case "ConfirmTvSwitch": ConfirmTvSwitch = v.Trim() != "0"; break;
                             case "TvAppPath": TvAppPath = v.Trim(); break;
                             case "TvAppArgs": TvAppArgs = v.Trim(); break;
                             case "TvAppName": TvAppName = v.Trim(); break;
@@ -1247,6 +1256,7 @@ namespace TVMode
             lines.Add("HotkeyMods=" + HotkeyMods);
             lines.Add("HotkeyKey=" + HotkeyKey);
             lines.Add("LaptopRefreshFollowsPower=" + (LaptopRefreshFollowsPower ? "1" : "0"));
+            lines.Add("ConfirmTvSwitch=" + (ConfirmTvSwitch ? "1" : "0"));
             lines.Add("LastMode=" + (LastMode == Mode.TV ? "TV" : LastMode == Mode.PC ? "PC" : ""));
             lines.Add("TvApps=1"); // marks the list format, so an empty list stays empty
             foreach (var a in TvApps)
